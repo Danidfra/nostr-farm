@@ -53,10 +53,22 @@ export interface MapState {
  * A SlotState can contain various entity types (plants, rocks, decorations, etc.).
  * The d tag is interpreted as a slot identifier, not a plant-specific identifier.
  * 
- * GROWTH MODEL: Time-based (Route A)
- * - Growth stage is computed from (plantedAt, nowSec, cropMeta.stageDurationSec)
- * - The 'stage' field is LEGACY and should NOT be used for rendering
- * - Rendering must always use computeGrowthStage() when crop metadata exists
+ * AUTHORITATIVE GROWTH MODEL (wet_until):
+ * - 'stage' is host-authoritative (stored on SlotState, not computed)
+ * - Per-stage timing uses 'stage_started_at' as the reference point
+ * - Growth progresses ONLY while the plant is wet:
+ *   • isWet(slot, now, cropMeta) => now < wet_until (+ epsilon)
+ *   • If dry (now >= wet_until), growth pauses completely
+ * - Watering extends wet_until:
+ *   • wet_until = max(currentWetUntil, now) + waterDurationSec
+ *   • Optional cap: maxWetBufferSec (if defined in crop metadata)
+ * - Rotting:
+ *   • Plants can only rot while DRY (wet plants cannot rot)
+ *   • expires_at = wet_until + 2 × stageDurationSec
+ *   • Plant rots if dry AND now > expires_at
+ * - Legacy compatibility:
+ *   • watered_at is deprecated but still emitted for backward compatibility
+ *   • water_count is optional telemetry (not used for progression)
  * 
  * SlotState is the ONLY source of truth for what exists in a slot.
  * SlotAction (kind 14159) represents intent, not state.
@@ -81,29 +93,36 @@ export interface SlotState {
   type: 'plant' | 'empty' | string;
   
   // Plant-specific fields (only present when type === 'plant')
-  /** Crop identifier */
+  /** Crop identifier (must match renderpack metadata) */
   crop?: string;
-  /** Growth stage (0-based index) - AUTHORITATIVE: Host-controlled stage tracking */
+  /** Growth stage (0-based index) - AUTHORITATIVE: Host-controlled, not computed client-side */
   stage?: number;
-  /** Timestamp when current stage's timer started (unix seconds) - Used for per-stage timing */
+  /** Timestamp when current stage's timer started (unix seconds) - Reference point for per-stage timing */
   stageStartedAt?: number;
-  /** Planting timestamp - Used for time-based growth computation */
+  /** Planting timestamp (unix seconds) - When plant was initially planted */
   plantedAt?: number;
   /** 
-   * Last watering timestamp
-   * @deprecated Use wetUntil instead. Kept for backward compatibility.
+   * Last watering timestamp (unix seconds)
+   * @deprecated Use wetUntil instead. Kept for backward compatibility only.
    */
   wateredAt?: number;
-  /** Timestamp until which the plant remains wet - Replaces wateredAt logic */
+  /** 
+   * Timestamp until which the plant remains wet (unix seconds) - AUTHORITATIVE watering state
+   * Growth progresses only while now < wet_until. Extended by watering actions.
+   */
   wetUntil?: number;
   /** 
    * Water count - Number of times plant has been watered
-   * @deprecated Use wetUntil/waterDurationSec for progression logic.
+   * @deprecated Optional telemetry only. Progression uses wetUntil, not waterCount.
    */
   waterCount?: number;
-  /** Ready-to-harvest timestamp - Set when plant reaches final stage */
+  /** Ready-to-harvest timestamp (unix seconds) - When plant reaches harvestable stage */
   readyAt?: number;
-  /** Expiration timestamp - When plant becomes rotten (readyAt + grace period) */
+  /** 
+   * Expiration timestamp (unix seconds) - When plant rots if dry
+   * Formula: wet_until + 2 × stageDurationSec
+   * Plant can only rot while DRY (now >= wet_until AND now > expires_at)
+   */
   expiresAt?: number;
   /** Optional: Harvest count */
   harvestCount?: number;

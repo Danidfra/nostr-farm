@@ -296,19 +296,25 @@ export function validateSlotAction(event: NostrEvent): boolean {
 }
 
 /**
- * Get the current revision of a SlotState
+ * Get slot revision number for concurrency control
  * 
  * Revision rules (for concurrency control):
- * - For plant slots: Use latest of (wateredAt, plantedAt, created_at)
+ * - For plant slots: Use latest of (wetUntil, wateredAt, plantedAt, created_at)
  * - For other slots: Use event.created_at
+ * 
+ * CRITICAL: wetUntil is the authoritative watering state in the new model.
+ * Any change to wet_until MUST change the revision to prevent stale-action replays.
+ * wateredAt is kept for backward compatibility with legacy events.
  * 
  * This ensures any state change (plant, water, harvest, clear) updates the revision.
  */
 export function getSlotRevision(slotState: SlotState): number {
   if (slotState.type === 'plant') {
     // Use the most recent timestamp as revision
+    // PRIORITY: wetUntil > wateredAt (for backward compatibility)
     const timestamps = [
-      slotState.wateredAt,
+      slotState.wetUntil,      // NEW: Authoritative watering state
+      slotState.wateredAt,     // LEGACY: Kept for compatibility
       slotState.plantedAt,
       slotState.event.created_at,
     ].filter((t): t is number => t !== undefined);
