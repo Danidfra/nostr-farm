@@ -62,18 +62,25 @@ export function FarmField({
   };
 
   return (
-    <div ref={ref} className="relative h-full w-full overflow-hidden">
+    // Pointer handlers live on the container, not on the letterboxed image
+    // below: `pointerToSlot` subtracts `viewport.offset*` itself, so it needs
+    // container-relative coordinates. Reading the rect of the already-offset
+    // image would subtract that offset a second time.
+    <div
+      ref={ref}
+      className={cn('relative h-full w-full overflow-hidden', busy ? 'cursor-wait' : 'cursor-pointer')}
+      onPointerMove={(event) => setHovered(handlePointer(event))}
+      onPointerLeave={() => setHovered(null)}
+      onClick={(event) => handleClick(event as unknown as React.PointerEvent<HTMLDivElement>)}
+    >
       <div
-        className={cn('absolute select-none', busy ? 'cursor-wait' : 'cursor-pointer')}
+        className="absolute select-none"
         style={{
           left: viewport.offsetX,
           top: viewport.offsetY,
           width: viewport.width,
           height: viewport.height,
         }}
-        onPointerMove={(event) => setHovered(handlePointer(event))}
-        onPointerLeave={() => setHovered(null)}
-        onClick={(event) => handleClick(event as unknown as React.PointerEvent<HTMLDivElement>)}
       >
         <img
           src={backgroundUrl}
