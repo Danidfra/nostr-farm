@@ -27,6 +27,11 @@ interface ItemFormProps {
   onChange: (form: ItemFormState) => void;
   upload: ItemImageUploadApi;
   canUpload: boolean;
+  /**
+   * The item is being edited in place, so its `d` is part of its identity and
+   * cannot change. Use the derivation flow to create a new item instead.
+   */
+  lockItemId?: boolean;
 }
 
 /**
@@ -36,18 +41,45 @@ interface ItemFormProps {
  * behind "Advanced" so the common path — a carrot with a name, a type and a
  * picture — stays short.
  */
-export function ItemForm({ form, onChange, upload, canUpload }: ItemFormProps) {
-  const patch = (changes: Partial<ItemFormState>) => onChange({ ...form, ...changes });
+export function ItemForm({ form, onChange, upload, canUpload, lockItemId = false }: ItemFormProps) {
+  const patch = (changes: Partial<ItemFormState>) => {
+    // `d` is identity. Disabling the input is presentation; refusing the change
+    // here is the behaviour, so no programmatic path can rename an item in
+    // place either. The page applies the same guard again on the state it
+    // stores — see `applyFormEdit`.
+    if (lockItemId && 'd' in changes && changes.d !== form.d) return;
+    onChange({ ...form, ...changes });
+  };
 
   return (
     <div className="space-y-5">
       <section className="grid gap-4 sm:grid-cols-2">
-        <Field label="Item id (d)" required hint="Recommended: namespace:category:slug">
-          <Input value={form.d} placeholder="farm:produce:carrot" onChange={(e) => patch({ d: e.target.value })} />
+        <Field
+          label="Item id (d)"
+          required
+          hint={
+            lockItemId
+              ? 'Fixed: d is part of this item’s address. Use “Use as template” to create a new item.'
+              : 'Recommended: namespace:category:slug'
+          }
+        >
+          <Input
+            value={form.d}
+            placeholder="farm:produce:carrot"
+            readOnly={lockItemId}
+            disabled={lockItemId}
+            aria-label="Item id (d)"
+            onChange={(e) => patch({ d: e.target.value })}
+          />
         </Field>
 
         <Field label="Name" required>
-          <Input value={form.name} placeholder="Carrot" onChange={(e) => patch({ name: e.target.value })} />
+          <Input
+            value={form.name}
+            placeholder="Carrot"
+            aria-label="Name"
+            onChange={(e) => patch({ name: e.target.value })}
+          />
         </Field>
 
         <Field label="Type" required hint="Broad and cross-game. Custom values allowed.">

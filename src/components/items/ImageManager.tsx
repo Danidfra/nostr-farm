@@ -29,14 +29,23 @@ export function ImageManager({ rows, onChange, upload, canUpload }: ImageManager
 
   const primaryCount = rows.filter((row) => row.marker === PRIMARY_MARKER && row.url.trim() !== '').length;
 
+  /**
+   * Apply whatever succeeded and keep whatever failed.
+   *
+   * Only the successful entries are cleared from the queue. A failed upload
+   * stays visible with its error so it can be retried, and because `uploadAll`
+   * skips entries that are already `done`, a retry never re-applies an image
+   * that already landed.
+   */
   const applyUploads = async () => {
     const uploaded = await upload.uploadAll();
-    if (uploaded.length === 0) return;
-    onChange([
-      ...rows.filter((row) => row.url.trim() !== ''),
-      ...uploaded.map((entry) => ({ ...blankImageRow(entry.marker), url: entry.url })),
-    ]);
-    upload.clear();
+    if (uploaded.length > 0) {
+      onChange([
+        ...rows.filter((row) => row.url.trim() !== ''),
+        ...uploaded.map((entry) => ({ ...blankImageRow(entry.marker), url: entry.url })),
+      ]);
+    }
+    upload.removeCompleted();
   };
 
   return (
@@ -149,10 +158,17 @@ export function ImageManager({ rows, onChange, upload, canUpload }: ImageManager
                 </Button>
               </div>
             ))}
-            <Button type="button" size="sm" disabled={upload.isUploading} onClick={applyUploads}>
-              {upload.isUploading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Upload to Blossom
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button type="button" size="sm" disabled={upload.isUploading || !upload.hasPending} onClick={applyUploads}>
+                {upload.isUploading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                {upload.hasFailures ? 'Retry failed uploads' : 'Upload to Blossom'}
+              </Button>
+              {upload.hasFailures && (
+                <span className="text-xs text-muted-foreground">
+                  Successful uploads were applied; failures stay listed for retry.
+                </span>
+              )}
+            </div>
           </div>
         )}
       </div>

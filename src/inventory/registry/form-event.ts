@@ -33,10 +33,27 @@ import {
 
 export type ConversionResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
-/** Tag names regenerated from form state rather than preserved verbatim. */
+/**
+ * The `client` tag this application stamps on the events it publishes.
+ *
+ * It is added HERE, during template construction, and not by the publisher.
+ * The review dialog shows the template, so anything the publisher appended
+ * afterwards would be a tag the user never saw — the event shown and the event
+ * signed have to be the same object.
+ */
+export const CLIENT_TAG: readonly string[] = Object.freeze(['client', 'nostr-worlds']);
+
+/**
+ * Tag names regenerated from form state rather than preserved verbatim.
+ *
+ * `client` is managed: a loaded event's `client` tag names whichever client
+ * published it, and re-publishing from here makes this the client. Treating it
+ * as managed regenerates it rather than preserving a stale value or emitting
+ * two.
+ */
 export const MANAGED_TAG_NAMES: ReadonlySet<string> = new Set([
   'd', 'name', 'type', 'category', 'image', 'model_3d', 'audio',
-  'symbol', 'rarity', 'max_stack', 'version', 'context', 't', 'alt',
+  'symbol', 'rarity', 'max_stack', 'version', 'context', 't', 'alt', 'client',
 ]);
 
 /**
@@ -200,7 +217,9 @@ export function formToBuildInput(form: ItemFormState): ConversionResult<BuildGam
         .filter((row) => row.address.trim() !== '')
         .map((row) => ({ address: row.address.trim(), relay: row.relay.trim() })),
       content: content.value,
-      extraTags: form.extraTags.map((tag) => [...tag]),
+      // The client tag rides along as an extra tag so it is present in the
+      // template the review dialog renders.
+      extraTags: [...form.extraTags.map((tag) => [...tag]), [...CLIENT_TAG]],
     },
   };
 }
@@ -239,6 +258,51 @@ function assertNoLiteralPrimaryMarker(tags: readonly string[][]): void {
       throw new Error('Refusing to publish an image tag marked "primary": the primary image is an unmarked image tag.');
     }
   }
+}
+
+/**
+ * Is this form an in-place edit of the definition it was loaded from?
+ *
+ * True only when the signer owns the loaded event AND the address the form
+ * would publish to is still the loaded one. kind:31632 is addressed by
+ * `(author, d)`, so the moment `d` changes the form describes a DIFFERENT item
+ * and re-publishing would create it rather than replace anything. Callers use
+ * this both to lock the `d` field and to decide whether the "re-publishing
+ * replaces this definition" promise is still true.
+ */
+export function isInPlaceEdit(form: ItemFormState, signerPubkey: string | null | undefined): boolean {
+  if (!form.loaded || !signerPubkey) return false;
+  if (form.loaded.pubkey !== signerPubkey) return false;
+  return formAddress(form, signerPubkey) === form.loaded.address;
+}
+
+/**
+ * The `d` that must not change, or `null` when the form is free to set one.
+ *
+ * Non-null exactly when the form was loaded from the signer's own published
+ * definition.
+ */
+export function lockedItemId(form: ItemFormState, signerPubkey: string | null | undefined): string | null {
+  if (!form.loaded || !signerPubkey || form.loaded.pubkey !== signerPubkey) return null;
+  return form.loaded.d;
+}
+
+/**
+ * Apply an edit to the form, refusing any change to a locked `d`.
+ *
+ * The `d` input is disabled in the UI, but identity is too important to leave
+ * to a disabled attribute: silently turning an edit into a new item is exactly
+ * the failure this guards. Creating a new identity from an existing definition
+ * has its own explicit path — {@link deriveAsNewItem}.
+ */
+export function applyFormEdit(
+  previous: ItemFormState,
+  next: ItemFormState,
+  signerPubkey: string | null | undefined
+): ItemFormState {
+  const locked = lockedItemId(previous, signerPubkey);
+  if (locked === null || next.d === locked) return next;
+  return { ...next, d: locked };
 }
 
 /** The full `31632:<pubkey>:<d>` address a form would publish to. */
@@ -385,6 +449,7 @@ export function eventToForm(
       pubkey: event.pubkey,
       createdAt: event.created_at,
       address: definition.address,
+      d: definition.id,
       relays,
     },
   };

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { parseGameItemDefinition, type GameItemDefinition } from '@/inventory/package';
-import { FARM_ISSUER_PUBKEY } from '@/inventory/constants';
+import { FARM_OFFICIAL_ISSUER_PUBKEY } from '@/inventory/constants';
 import { applyFilters, blankFilters, facetValues, matchesFilters, sortForDisplay } from './filters';
 
 const EXTERNAL = 'b'.repeat(64);
@@ -23,13 +23,13 @@ function item(
   return parseGameItemDefinition({ kind: 31632, pubkey, created_at: 0, tags, content: '' })!;
 }
 
-const carrot = item(FARM_ISSUER_PUBKEY, 'farm:produce:carrot', {
+const carrot = item(FARM_OFFICIAL_ISSUER_PUBKEY, 'farm:produce:carrot', {
   name: 'Carrot',
   category: 'food',
   contexts: ['game:farm', 'cross-game'],
   topics: ['edible', 'vegetable'],
 });
-const hoe = item(FARM_ISSUER_PUBKEY, 'farm:tool:hoe', { name: 'Hoe', type: 'tool', category: 'tool', topics: ['tool'] });
+const hoe = item(FARM_OFFICIAL_ISSUER_PUBKEY, 'farm:tool:hoe', { name: 'Hoe', type: 'tool', category: 'tool', topics: ['tool'] });
 const stranger = item(EXTERNAL, 'other:food:apple', {
   name: 'Apple',
   category: 'food',
@@ -101,7 +101,7 @@ describe('display order', () => {
 
 describe('same d under two issuers', () => {
   it('keeps them as two distinct items', () => {
-    const mine = item(FARM_ISSUER_PUBKEY, 'shared:d');
+    const mine = item(FARM_OFFICIAL_ISSUER_PUBKEY, 'shared:d');
     const theirs = item(EXTERNAL, 'shared:d');
 
     expect(mine.address).not.toBe(theirs.address);

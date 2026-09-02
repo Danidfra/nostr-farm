@@ -14,10 +14,26 @@ export interface ItemImageUploadApi {
   addFiles: (files: readonly File[]) => void;
   setMarker: (id: string, marker: string) => void;
   remove: (id: string) => void;
+  /** Drop every entry, successful or not. */
   clear: () => void;
-  /** Upload every queued file; resolves with the rows that succeeded. */
+  /**
+   * Drop only the entries that finished successfully, leaving failures queued
+   * for retry.
+   */
+  removeCompleted: () => void;
+  /**
+   * Upload every entry that has not yet succeeded — queued ones and previously
+   * failed ones — and resolve with the rows that succeeded in THIS run.
+   *
+   * Entries already `done` are skipped, so retrying after a partial failure
+   * cannot upload or re-apply an image twice.
+   */
   uploadAll: () => Promise<{ url: string; marker: string }[]>;
   isUploading: boolean;
+  /** At least one entry has not succeeded yet. */
+  hasPending: boolean;
+  /** At least one entry failed and can be retried. */
+  hasFailures: boolean;
 }
 
 /**
@@ -60,6 +76,11 @@ export function useItemImageUpload(): ItemImageUploadApi {
 
   const clear = useCallback(() => setEntries([]), []);
 
+  const removeCompleted = useCallback(
+    () => setEntries((previous) => previous.filter((entry) => entry.status !== 'done')),
+    []
+  );
+
   const uploadAll = useCallback(async () => {
     const pending = entries.filter((entry) => entry.status === 'queued' || entry.status === 'error');
     if (pending.length === 0) return [];
@@ -90,5 +111,16 @@ export function useItemImageUpload(): ItemImageUploadApi {
     return uploaded;
   }, [entries, uploadFile]);
 
-  return { entries, addFiles, setMarker, remove, clear, uploadAll, isUploading };
+  return {
+    entries,
+    addFiles,
+    setMarker,
+    remove,
+    clear,
+    removeCompleted,
+    uploadAll,
+    isUploading,
+    hasPending: entries.some((entry) => entry.status !== 'done'),
+    hasFailures: entries.some((entry) => entry.status === 'error'),
+  };
 }

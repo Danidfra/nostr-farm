@@ -33,21 +33,32 @@ describe('marker suggestion from filename', () => {
 });
 
 describe('Blossom upload result', () => {
-  it('reads the URL from the url tag', () => {
+  it('reads the URL from an explicit url tag, wherever it sits', () => {
     expect(urlFromUploadTags([['url', 'https://blossom.primal.net/abc.png'], ['x', 'hash']])).toBe(
       'https://blossom.primal.net/abc.png'
     );
+    expect(urlFromUploadTags([['x', 'hash'], ['url', 'http://example.com/a.png']])).toBe('http://example.com/a.png');
   });
 
-  it('falls back to the first tag when there is no named url tag', () => {
-    expect(urlFromUploadTags([['whatever', 'https://blossom.primal.net/abc.png']])).toBe(
-      'https://blossom.primal.net/abc.png'
-    );
+  it('never falls back to an arbitrary tag', () => {
+    // The old behaviour took tags[0], which would publish a sha256 hash as an
+    // item's artwork URL.
+    expect(urlFromUploadTags([['x', 'https://blossom.primal.net/abc.png']])).toBeUndefined();
+    expect(urlFromUploadTags([['x', '9f8e7d6c5b4a']])).toBeUndefined();
   });
 
   it('returns undefined for an empty or missing URL rather than a blank image tag', () => {
     expect(urlFromUploadTags([])).toBeUndefined();
     expect(urlFromUploadTags([['url', '']])).toBeUndefined();
     expect(urlFromUploadTags([['url', '   ']])).toBeUndefined();
+    expect(urlFromUploadTags([['url']])).toBeUndefined();
+  });
+
+  it('rejects anything that is not a usable http(s) URL', () => {
+    expect(urlFromUploadTags([['url', 'not a url']])).toBeUndefined();
+    expect(urlFromUploadTags([['url', '/relative/path.png']])).toBeUndefined();
+    expect(urlFromUploadTags([['url', 'data:image/png;base64,AAAA']])).toBeUndefined();
+    expect(urlFromUploadTags([['url', 'javascript:alert(1)']])).toBeUndefined();
+    expect(urlFromUploadTags([['url', 'ftp://example.com/a.png']])).toBeUndefined();
   });
 });

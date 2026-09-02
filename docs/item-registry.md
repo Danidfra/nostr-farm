@@ -27,13 +27,18 @@ it is `edible`; what "edible" *does* is decided by whichever game consumes it.
 An item is official when, and only when:
 
 ```
-event.pubkey === FARM_ISSUER_PUBKEY
+event.pubkey === FARM_OFFICIAL_ISSUER_PUBKEY
 ```
 
-`FARM_ISSUER_PUBKEY` is `f47aaf2e…199fb4`
-(`npub173a27t3j08lxlnw7243nd50hgpc9zfkf5dlx8y8zah3pzegen76q8fl9lm`), overridable
-per build with `VITE_FARM_ISSUER_PUBKEY`. It is a public identifier; no secret
-key is stored, derived or read anywhere in the application.
+`FARM_OFFICIAL_ISSUER_PUBKEY` is `f47aaf2e…199fb4`
+(`npub173a27t3j08lxlnw7243nd50hgpc9zfkf5dlx8y8zah3pzegen76q8fl9lm`), fixed in
+source. There is deliberately **no environment override and no runtime
+configuration**: "official" is a claim about one specific public identity, and a
+build-time variable that could make a different key render as official would
+turn the badge into something an operator can forge.
+
+It is a public identifier; no secret key is stored, derived or read anywhere in
+the application.
 
 Every row shows **Official Farm Item** or **External Item** plus the abbreviated
 npub. External is not a synonym for invalid: anybody may publish a kind:31632
@@ -50,6 +55,13 @@ de-duplication, not in the copy button.
 The default query scope asks the registry relays only for the official issuer's
 items, which is a single indexed `authors` query. **All Nostr items** is an
 explicit opt-in that drops the author filter.
+
+Relay outcomes are distinguished rather than flattened: if some relays answer
+their results are used; if **every** relay fails the query fails and the UI
+shows the error, because "nobody answered" and "everybody answered, there is
+nothing" look identical on an empty page and only one of them means the registry
+is empty. A successful query returning no valid items is a legitimate empty
+list.
 
 Client-side filters cover search (name, `d`, address), issuer scope, issuer
 pubkey prefix, type, category, context and topic. `type`, `category` and
@@ -81,6 +93,21 @@ item's issuer** — publishing somebody else's item under your own key creates a
 *different* item, which the UI offers separately as "Use as template" and
 records as a `based_on` derivation.
 
+### `d` is immutable during an in-place edit
+
+`d` is half the item's address, so changing it during an edit would not edit
+anything — it would create a second item and silently leave the original
+behind. Once a form is loaded from the signer's own published definition the
+`d` input is disabled, and two further guards make that structural rather than
+cosmetic: `ItemForm` drops a `d` change while locked, and the page runs
+`applyFormEdit`, which pins `d` to the loaded value whatever it is handed. The
+"re-publishing replaces it" banner is shown only while `isInPlaceEdit` is true,
+i.e. while the address genuinely still matches.
+
+Creating a new identity from an existing definition stays an explicit action:
+"Use as template" clears the provenance, unlocks `d`, and records the original
+as a `based_on` reference.
+
 ## Blossom images
 
 `useUploadFile` builds a `BlossomUploader` against `blossom.primal.net` and
@@ -93,6 +120,15 @@ suggests a view marker from the filename — `carrot-side-left.png` proposes
 An upload does exactly one thing: it puts a URL into an image row. It never
 signs an item definition and never publishes.
 
+Only an explicit `["url", "<value>"]` tag counts as a result, and the value must
+parse as an `http:`/`https:` URL. An upload that yields no usable URL is a
+failed upload, not an item with a hash where its artwork should be.
+
+Partial failure is preserved: successful uploads are applied to the form and
+dropped from the queue, while failures stay listed with their error and can be
+retried. `uploadAll` skips entries that already succeeded, so a retry never
+uploads or re-applies the same image twice.
+
 Markers supported: `front`, `side-right`, `side-left`, `back`,
 `diagonal-front-right`, `diagonal-front-left`. None are required. The editor
 warns when there is no unmarked image, or more than one.
@@ -100,9 +136,13 @@ warns when there is no unmarked image, or more than one.
 ## Publishing
 
 The review dialog shows the exact unsigned event — `kind`, `content`, `tags` —
-because that, not the form, is what gets signed. Publishing happens only from
-the explicit button there; it is never wired to a form change, a blur, or the
-completion of an upload.
+because that, not the form, is what gets signed. **The publisher signs the
+template verbatim**: it appends, removes and reorders nothing, so the reviewed
+event and the signed event cannot drift. Tags the app wants on everything it
+publishes (`client`) are added during template construction, before the review,
+which is why the review shows them. Publishing happens only from the explicit
+button there; it is never wired to a form change, a blur, or the completion of
+an upload.
 
 The event is signed with `useCurrentUser().user.signer` and offered to every
 registry relay individually, with each relay's answer reported. This does not go

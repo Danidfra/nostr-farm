@@ -2,7 +2,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { parseGameItemDefinition, type GameItemDefinition } from '@/inventory/package';
-import { FARM_ISSUER_PUBKEY } from '@/inventory/constants';
+import { FARM_OFFICIAL_ISSUER_PUBKEY } from '@/inventory/constants';
 import { ItemCard } from './ItemCard';
 
 const EXTERNAL = 'b'.repeat(64);
@@ -31,7 +31,7 @@ afterEach(cleanup);
 
 describe('ItemCard issuer distinction', () => {
   it('labels an item from the Farm issuer as official', () => {
-    render(<ItemCard item={item(FARM_ISSUER_PUBKEY)} signerPubkey={null} onEdit={noop} onDerive={noop} onCopyAddress={noop} />);
+    render(<ItemCard item={item(FARM_OFFICIAL_ISSUER_PUBKEY)} signerPubkey={null} onEdit={noop} onDerive={noop} onCopyAddress={noop} />);
     expect(screen.getByText('Official Farm Item')).toBeInTheDocument();
     expect(screen.queryByText('External Item')).not.toBeInTheDocument();
   });
@@ -51,20 +51,20 @@ describe('ItemCard issuer distinction', () => {
 describe('ItemCard edit permission', () => {
   it('offers Edit only when the signer is the item issuer', () => {
     render(
-      <ItemCard item={item(FARM_ISSUER_PUBKEY)} signerPubkey={FARM_ISSUER_PUBKEY} onEdit={noop} onDerive={noop} onCopyAddress={noop} />
+      <ItemCard item={item(FARM_OFFICIAL_ISSUER_PUBKEY)} signerPubkey={FARM_OFFICIAL_ISSUER_PUBKEY} onEdit={noop} onDerive={noop} onCopyAddress={noop} />
     );
     expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Use as template' })).not.toBeInTheDocument();
   });
 
   it('offers a template copy instead when the signer is somebody else', () => {
-    render(<ItemCard item={item(FARM_ISSUER_PUBKEY)} signerPubkey={EXTERNAL} onEdit={noop} onDerive={noop} onCopyAddress={noop} />);
+    render(<ItemCard item={item(FARM_OFFICIAL_ISSUER_PUBKEY)} signerPubkey={EXTERNAL} onEdit={noop} onDerive={noop} onCopyAddress={noop} />);
     expect(screen.getByRole('button', { name: 'Use as template' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
   });
 
   it('offers no edit at all when signed out', () => {
-    render(<ItemCard item={item(FARM_ISSUER_PUBKEY)} signerPubkey={null} onEdit={noop} onDerive={noop} onCopyAddress={noop} />);
+    render(<ItemCard item={item(FARM_OFFICIAL_ISSUER_PUBKEY)} signerPubkey={null} onEdit={noop} onDerive={noop} onCopyAddress={noop} />);
     expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
   });
 });
@@ -73,7 +73,7 @@ describe('ItemCard primary image', () => {
   it('renders the unmarked image, not a marked view', () => {
     render(
       <ItemCard
-        item={item(FARM_ISSUER_PUBKEY, [
+        item={item(FARM_OFFICIAL_ISSUER_PUBKEY, [
           ['image', 'https://example.com/front.png', 'front'],
           ['image', 'https://example.com/main.png'],
         ])}
@@ -89,7 +89,7 @@ describe('ItemCard primary image', () => {
   it('falls back to the first marked view when there is no unmarked image', () => {
     render(
       <ItemCard
-        item={item(FARM_ISSUER_PUBKEY, [['image', 'https://example.com/side.png', 'side-left']])}
+        item={item(FARM_OFFICIAL_ISSUER_PUBKEY, [['image', 'https://example.com/side.png', 'side-left']])}
         signerPubkey={null}
         onEdit={noop}
         onDerive={noop}
@@ -100,7 +100,7 @@ describe('ItemCard primary image', () => {
   });
 
   it('renders no image element when the item has none', () => {
-    render(<ItemCard item={item(FARM_ISSUER_PUBKEY)} signerPubkey={null} onEdit={noop} onDerive={noop} onCopyAddress={noop} />);
+    render(<ItemCard item={item(FARM_OFFICIAL_ISSUER_PUBKEY)} signerPubkey={null} onEdit={noop} onDerive={noop} onCopyAddress={noop} />);
     expect(screen.queryByAltText('Carrot')).not.toBeInTheDocument();
   });
 });
@@ -109,10 +109,10 @@ describe('ItemCard address', () => {
   it('copies the full 31632:pubkey:d address, never the d alone', async () => {
     const onCopyAddress = vi.fn();
     render(
-      <ItemCard item={item(FARM_ISSUER_PUBKEY)} signerPubkey={null} onEdit={noop} onDerive={noop} onCopyAddress={onCopyAddress} />
+      <ItemCard item={item(FARM_OFFICIAL_ISSUER_PUBKEY)} signerPubkey={null} onEdit={noop} onDerive={noop} onCopyAddress={onCopyAddress} />
     );
 
     screen.getByRole('button', { name: /Copy address/ }).click();
-    expect(onCopyAddress).toHaveBeenCalledWith(`31632:${FARM_ISSUER_PUBKEY}:farm:produce:carrot`);
+    expect(onCopyAddress).toHaveBeenCalledWith(`31632:${FARM_OFFICIAL_ISSUER_PUBKEY}:farm:produce:carrot`);
   });
 });

@@ -29,7 +29,6 @@ export interface PublishItemDefinitionResult {
 }
 
 const PUBLISH_TIMEOUT_MS = 8000;
-const CLIENT_TAG = ['client', 'nostr-worlds'];
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -66,16 +65,17 @@ export function usePublishItemDefinition() {
     }): Promise<PublishItemDefinitionResult> => {
       if (!user?.signer) throw new Error('No signer is available. Sign in before publishing.');
 
-      const tags = template.tags.some(([name]) => name === 'client')
-        ? template.tags.map((tag) => [...tag])
-        : [...template.tags.map((tag) => [...tag]), [...CLIENT_TAG]];
-
+      // The template is signed EXACTLY as reviewed. Nothing is appended,
+      // removed or reordered here: the review dialog renders this same
+      // kind/content/tags, and a publisher that quietly added a tag would make
+      // that claim false. Tags the app wants on every event (`client`) are
+      // added during template construction — see `CLIENT_TAG` in form-event.ts.
       let event: NostrEvent;
       try {
         event = await user.signer.signEvent({
           kind: template.kind,
           content: template.content,
-          tags,
+          tags: template.tags.map((tag) => [...tag]),
           created_at: Math.floor(Date.now() / 1000),
         });
       } catch (error) {

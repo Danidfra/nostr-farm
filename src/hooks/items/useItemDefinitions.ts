@@ -7,7 +7,7 @@ import {
   parseGameItemDefinitionResult,
   type GameItemDefinition,
 } from '@/inventory/package';
-import { FARM_ISSUER_PUBKEY, ITEM_REGISTRY_RELAYS } from '@/inventory/constants';
+import { FARM_OFFICIAL_ISSUER_PUBKEY, ITEM_REGISTRY_RELAYS } from '@/inventory/constants';
 
 /** How the registry scopes its relay query. */
 export type RegistryScope = 'farm' | 'all';
@@ -19,6 +19,27 @@ export interface ItemDefinitionRecord {
   warnings: string[];
   /** Relays this exact event was seen on. */
   relays: string[];
+}
+
+/** One relay's answer: its events, or the reason it could not be reached. */
+export interface RelayQueryResult {
+  relay: string;
+  events: readonly NostrEvent[];
+  /** Present when the query failed. */
+  error?: string;
+}
+
+/**
+ * Every registry relay failed, so the registry is unknown rather than empty.
+ */
+export class AllRelaysFailedError extends Error {
+  constructor(readonly failures: readonly RelayQueryResult[]) {
+    super(
+      `Could not reach any registry relay (${failures.length} failed): ` +
+        failures.map((f) => `${f.relay} — ${f.error ?? 'unknown error'}`).join('; ')
+    );
+    this.name = 'AllRelaysFailedError';
+  }
 }
 
 export const ITEM_DEFINITIONS_KEY = 'item-definitions';
@@ -39,7 +60,7 @@ const QUERY_LIMIT = 500;
  * alone, which is not globally unique.
  */
 export function selectNewestDefinitions(
-  results: readonly { relay: string; events: readonly NostrEvent[] }[]
+  results: readonly RelayQueryResult[]
 ): Map<string, ItemDefinitionRecord> {
   const byAddress = new Map<string, ItemDefinitionRecord>();
 
@@ -72,6 +93,25 @@ export function selectNewestDefinitions(
 }
 
 /**
+ * Reduce every relay's answer to the registry list.
+ *
+ * Partial failure is tolerated — one unreachable relay must not empty the
+ * registry — but TOTAL failure is not silently turned into an empty list.
+ * "Nobody answered" and "everybody answered, there is nothing" look identical
+ * to a user staring at an empty page, and only one of them means the registry
+ * is actually empty.
+ *
+ * @throws {AllRelaysFailedError} when every relay failed.
+ */
+export function collectDefinitions(results: readonly RelayQueryResult[]): ItemDefinitionRecord[] {
+  const failures = results.filter((result) => result.error !== undefined);
+  if (results.length > 0 && failures.length === results.length) {
+    throw new AllRelaysFailedError(failures);
+  }
+  return [...selectNewestDefinitions(results).values()];
+}
+
+/**
  * Read kind:31632 definitions for the registry.
  *
  * Scope decides what is asked of the relays, and the default is deliberately
@@ -90,10 +130,13 @@ export function useItemDefinitions(scope: RegistryScope, topics: readonly string
   return useQuery<ItemDefinitionRecord[]>({
     queryKey: itemDefinitionsQueryKey(scope, topics),
     staleTime: 30_000,
+    // A total relay outage should surface quickly rather than after the default
+    // three retries; a genuine blip is still retried once.
+    retry: 1,
     queryFn: async ({ signal }) => {
       const filter = {
         ...buildGameItemDefinitionFilter({
-          authors: scope === 'farm' ? [FARM_ISSUER_PUBKEY] : undefined,
+          authors: scope === 'farm' ? [FARM_OFFICIAL_ISSUER_PUBKEY] : undefined,
           topics: [...topics],
         }),
         limit: QUERY_LIMIT,
@@ -102,18 +145,18 @@ export function useItemDefinitions(scope: RegistryScope, topics: readonly string
       const timeout = AbortSignal.any([signal, AbortSignal.timeout(QUERY_TIMEOUT_MS)]);
 
       const results = await Promise.all(
-        ITEM_REGISTRY_RELAYS.map(async (relay) => {
+        ITEM_REGISTRY_RELAYS.map(async (relay): Promise<RelayQueryResult> => {
           try {
-            const events = await nostr.relay(relay).query([filter], { signal: timeout });
-            return { relay, events };
-          } catch {
-            // One unreachable relay must not empty the registry.
-            return { relay, events: [] as NostrEvent[] };
+            return { relay, events: await nostr.relay(relay).query([filter], { signal: timeout }) };
+          } catch (error) {
+            // One unreachable relay must not empty the registry; every relay
+            // failing is an error, not an empty registry. See collectDefinitions.
+            return { relay, events: [], error: error instanceof Error ? error.message : String(error) };
           }
         })
       );
 
-      return [...selectNewestDefinitions(results).values()];
+      return collectDefinitions(results);
     },
   });
 }

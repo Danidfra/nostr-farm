@@ -10,31 +10,23 @@
  * The canonical Farm item issuer.
  *
  * An item is an official Farm item when, and only when,
- * `event.pubkey === FARM_ISSUER_PUBKEY`. Anything else is an external item —
- * which is not the same as invalid or malicious, and the registry says so.
+ * `event.pubkey === FARM_OFFICIAL_ISSUER_PUBKEY`. Anything else is an external
+ * item — which is not the same as invalid or malicious, and the registry says
+ * so.
  *
  * npub: npub173a27t3j08lxlnw7243nd50hgpc9zfkf5dlx8y8zah3pzegen76q8fl9lm
+ *
+ * FIXED IN SOURCE, DELIBERATELY. There is no environment override and no
+ * runtime configuration: "official" is a claim about one specific public
+ * identity, and a build-time variable that could make a different key render as
+ * official would turn the badge into something an operator can forge. A staging
+ * issuer is not worth that.
  *
  * This is a public identifier. No secret key is stored, derived or read
  * anywhere in this application.
  */
-const DEFAULT_FARM_ISSUER_PUBKEY =
-  'f47aaf2e3279fe6fcdde556336d1f740705126c9a37e6390e2ede21165199fb4';
-
-/**
- * Overridable per build so a staging deployment can point at a test issuer
- * without editing source. Falsy or malformed values fall back to the canonical
- * issuer rather than silently disabling the official/external distinction.
- */
-function resolveIssuer(): string {
-  const override = import.meta.env?.VITE_FARM_ISSUER_PUBKEY;
-  if (typeof override === 'string' && /^[0-9a-f]{64}$/.test(override.trim())) {
-    return override.trim();
-  }
-  return DEFAULT_FARM_ISSUER_PUBKEY;
-}
-
-export const FARM_ISSUER_PUBKEY: string = resolveIssuer();
+export const FARM_OFFICIAL_ISSUER_PUBKEY =
+  'f47aaf2e3279fe6fcdde556336d1f740705126c9a37e6390e2ede21165199fb4' as const;
 
 /**
  * Relays the registry reads from and publishes to, in addition to whichever

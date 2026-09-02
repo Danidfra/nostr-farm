@@ -22,7 +22,15 @@ import { useItemImageUpload } from '@/hooks/items/useItemImageUpload';
 import { usePublishItemDefinition, type PublishItemDefinitionResult } from '@/hooks/items/usePublishItemDefinition';
 import type { GameItemDefinition } from '@/inventory/package';
 import { blankItemForm, type ItemFormState } from '@/inventory/registry/form-model';
-import { deriveAsNewItem, eventToForm, formAddress, formToUnsignedEvent } from '@/inventory/registry/form-event';
+import {
+  applyFormEdit,
+  deriveAsNewItem,
+  eventToForm,
+  formAddress,
+  formToUnsignedEvent,
+  isInPlaceEdit,
+  lockedItemId,
+} from '@/inventory/registry/form-event';
 import { applyFilters, blankFilters, facetValues, sortForDisplay, type RegistryFilters } from '@/inventory/registry/filters';
 
 /**
@@ -61,7 +69,18 @@ export default function ItemRegistryPage() {
 
   const built = useMemo(() => formToUnsignedEvent(form), [form]);
   const address = formAddress(form, user?.pubkey ?? null);
-  const isEditing = form.loaded !== null && form.loaded.pubkey === user?.pubkey;
+  const signerPubkey = user?.pubkey ?? null;
+
+  // `lockedItemId` is non-null whenever the form came from the signer's own
+  // published definition; `isInPlaceEdit` additionally requires the address to
+  // still match, so the "replaces this definition" promise is only made while
+  // it is actually true.
+  const idLocked = lockedItemId(form, signerPubkey) !== null;
+  const isEditing = isInPlaceEdit(form, signerPubkey);
+
+  // Identity is not left to a disabled input: a `d` change on a loaded item is
+  // refused here too.
+  const updateForm = (next: ItemFormState) => setForm((current) => applyFormEdit(current, next, signerPubkey));
 
   const copyAddress = async (value: string) => {
     try {
@@ -259,7 +278,7 @@ export default function ItemRegistryPage() {
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
-                {form.loaded && !isEditing && (
+                {form.loaded && !idLocked && (
                   <p className="rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
                     This definition was issued by another key, so it cannot be edited in place — publishing will create a
                     new item under yours, recorded as a <code>based_on</code> derivation.
@@ -281,7 +300,7 @@ export default function ItemRegistryPage() {
                   </p>
                 )}
 
-                <ItemForm form={form} onChange={setForm} upload={upload} canUpload={!!user} />
+                <ItemForm form={form} onChange={updateForm} upload={upload} canUpload={!!user} lockItemId={idLocked} />
               </CardContent>
             </Card>
           </TabsContent>

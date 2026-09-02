@@ -46,9 +46,28 @@ export interface UploadEntry {
   error?: string;
 }
 
-/** Pull the URL out of the NIP-94 style tag list a Blossom upload returns. */
+/**
+ * Pull the URL out of the NIP-94 style tag list a Blossom upload returns.
+ *
+ * STRICT ON PURPOSE. Only an explicit `["url", "<value>"]` tag counts, and the
+ * value must parse as an `http:`/`https:` URL. The previous version fell back
+ * to the first tag of any name, which meant a response shaped differently —
+ * `["x", "<sha256>"]` first, say — would put a hash, or any other metadata
+ * string, into an `image` tag and publish it as an item's artwork. An upload
+ * that yields no usable URL is a failed upload, not an item with a broken
+ * image.
+ */
 export function urlFromUploadTags(tags: readonly string[][]): string | undefined {
-  const urlTag = tags.find(([name]) => name === 'url') ?? tags[0];
-  const url = urlTag?.[1];
-  return url && url.trim() !== '' ? url : undefined;
+  const value = tags.find(([name]) => name === 'url')?.[1]?.trim();
+  if (!value) return undefined;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
+
+  return value;
 }

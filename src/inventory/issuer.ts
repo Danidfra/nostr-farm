@@ -1,6 +1,6 @@
 import { nip19 } from 'nostr-tools';
 
-import { FARM_ISSUER_PUBKEY } from './constants';
+import { FARM_OFFICIAL_ISSUER_PUBKEY } from './constants';
 
 /**
  * Who issued an item, and who is signing.
@@ -52,7 +52,7 @@ export function safeNpub(pubkey: string | null | undefined): string | null {
 
 /** Is this pubkey the official Farm item issuer? */
 export function isFarmIssuer(pubkey: string | null | undefined): boolean {
-  return !!pubkey && pubkey === FARM_ISSUER_PUBKEY;
+  return !!pubkey && pubkey === FARM_OFFICIAL_ISSUER_PUBKEY;
 }
 
 /** Describe an item's issuer for display. */

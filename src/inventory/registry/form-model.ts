@@ -125,6 +125,11 @@ export interface LoadedItemMeta {
   pubkey: string;
   createdAt: number;
   address: string;
+  /**
+   * The `d` the definition was published under. Held separately from the
+   * editable field so an in-place edit can be pinned to it.
+   */
+  d: string;
   relays: string[];
 }
 
