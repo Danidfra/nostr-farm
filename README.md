@@ -30,7 +30,7 @@ Sign in with a NIP-07 extension, a bunker URI or an nsec, then create your farm.
 src/farm/        pure domain — no React, no Nostr, no clock, no browser
 src/world/       map definitions, pinned renderpacks, render geometry
 src/nostr/       world / map / slot event schemas
-src/inventory/   boundary for a later inventory integration
+src/inventory/   kind:31632 item registry + boundary for later inventory work
 src/hooks/       React glue
 src/components/  UI
 src/dev/         build-flag gated developer tools (/dev, /dev/worlds)
@@ -44,6 +44,7 @@ docs/            architecture and protocol notes
   bugs the previous implementation had
 - [World / Map / Slot state](docs/state-model.md)
 - [Renderpacks](docs/renderpacks.md)
+- [Game Item Registry](docs/item-registry.md) — kind:31632 browsing and authoring
 - [Developer tools](docs/dev-tools.md)
 - [Future: visitor actions](docs/future-visitor-actions.md)
 

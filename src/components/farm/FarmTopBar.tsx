@@ -1,10 +1,12 @@
-import { LogOut } from 'lucide-react';
+import { LogOut, Package } from 'lucide-react';
+import { Link } from 'react-router-dom';
 
 import { Button } from '@/components/ui/button';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useLoginActions } from '@/hooks/useLoginActions';
 import { genUserName } from '@/lib/genUserName';
 import { formatRenderpackRef, type RenderpackRef } from '@/world/renderpack/registry';
+import { ITEM_REGISTRY_ROUTE } from '@/inventory/routes';
 
 interface FarmTopBarProps {
   farmName?: string;
@@ -29,14 +31,23 @@ export function FarmTopBar({ farmName, renderpack }: FarmTopBarProps) {
         )}
       </div>
 
-      {user && (
-        <div className="flex items-center gap-3">
-          <span className="hidden text-sm font-medium sm:inline">{displayName}</span>
-          <Button variant="ghost" size="icon" onClick={() => logout()} aria-label="Log out">
-            <LogOut className="h-4 w-4" />
-          </Button>
-        </div>
-      )}
+      <div className="flex items-center gap-3">
+        <Button asChild variant="ghost" size="sm">
+          <Link to={ITEM_REGISTRY_ROUTE}>
+            <Package className="mr-2 h-4 w-4" />
+            Items
+          </Link>
+        </Button>
+
+        {user && (
+          <>
+            <span className="hidden text-sm font-medium sm:inline">{displayName}</span>
+            <Button variant="ghost" size="icon" onClick={() => logout()} aria-label="Log out">
+              <LogOut className="h-4 w-4" />
+            </Button>
+          </>
+        )}
+      </div>
     </header>
   );
 }

@@ -1,5 +1,5 @@
 import type { HarvestResult } from '@/farm/harvest/types';
-import { FARM_INVENTORY_CONTEXT, inventoryPackageStatus } from './package';
+import { FARM_INVENTORY_CONTEXT } from './package';
 
 /**
  * The Farm's view of "an inventory".
@@ -27,13 +27,15 @@ export interface InventoryAdapter {
 /**
  * V1 adapter: records nothing, publishes nothing, and says so.
  *
- * Harvesting stops at the domain result on purpose — real 31633 rewards are a
- * later milestone with its own protocol review.
+ * Harvesting stops at the domain result on purpose. The protocol package is now
+ * a dependency — the Item Registry uses its kind:31632 half — but kind:31633
+ * inventory writes are a separate milestone with their own protocol review, so
+ * this stays unavailable until that lands.
  */
 export function createNullInventoryAdapter(context: string = FARM_INVENTORY_CONTEXT): InventoryAdapter {
   return {
     context,
-    isAvailable: () => inventoryPackageStatus().installed,
+    isAvailable: () => false,
     credit: async () => null,
   };
 }

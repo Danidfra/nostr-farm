@@ -16,6 +16,7 @@ changes. This file is the short version.
    it is dead. — `src/nostr/world-map-state.test.ts`
 4. **`@nostr-games/inventory` may only ever be imported by
    `src/inventory/package.ts`,** and `src/farm` must contain no inventory code.
+   Every registry module goes through the `@/inventory/package` re-export.
    — `src/inventory/boundary.test.ts`
 5. **Renderpacks are pinned to exact commits.** No `master`/`main`/`HEAD`, no
    `raw.githubusercontent.com`. — `src/world/world.test.ts`
@@ -34,6 +35,7 @@ test to relax.
 | an event tag or parser | `src/nostr/` |
 | a relay query or mutation | `src/hooks/farm/` |
 | a developer-only tool | `src/dev/` (gated, see `docs/dev-tools.md`) |
+| kind:31632 item logic | `src/inventory/registry/`, see `docs/item-registry.md` |
 
 Gameplay decisions belong in `src/farm` and nowhere else. Hooks and components
 move values around; they do not re-derive rules.
@@ -77,6 +79,6 @@ Run it before claiming anything works. `npm run build` must not emit a
 ## Out of scope right now
 
 Shared farms, host election, command polling, visitor actions (kind 1415 is a
-recorded candidate only), inventory publishing, item definitions, economy,
+recorded candidate only), kind:31633 inventory publishing, economy,
 animals, NPCs, shops, crafting, quests, progression, tilesets and player
 movement.

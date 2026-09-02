@@ -2,8 +2,15 @@ import { lazy, Suspense } from 'react';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 
 import { DEV_ROUTE, DEV_TOOLS_ENABLED, DEV_WORLDS_ROUTE } from '@/dev/enabled';
+import { ITEM_REGISTRY_ROUTE } from '@/inventory/routes';
 import FarmPage from './pages/FarmPage';
 import NotFound from './pages/NotFound';
+
+// The registry is a real feature route, not a dev tool: browsing item
+// definitions is useful to anyone, and publishing is already gated behind
+// having a signer plus an explicit review step. It is lazily loaded so the
+// gameplay bundle does not carry the authoring UI.
+const ItemRegistryPage = lazy(() => import('./pages/ItemRegistryPage'));
 
 // Both the routes and the dynamic imports sit behind a build-time literal, so a
 // production build with dev tools disabled emits no dev chunks at all.
@@ -19,6 +26,14 @@ export function AppRouter() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<FarmPage />} />
+        <Route
+          path={ITEM_REGISTRY_ROUTE}
+          element={
+            <Suspense fallback={null}>
+              <ItemRegistryPage />
+            </Suspense>
+          }
+        />
 
         {devRoutes.map(({ path, Component }) => (
           <Route
