@@ -1,5 +1,5 @@
 import type { GameItemDefinition } from '@/inventory/package';
-import { isFarmIssuer } from '@/inventory/issuer';
+import { canEditItem, isFarmIssuer } from '@/inventory/issuer';
 
 /**
  * Client-side narrowing of an already-fetched item list.
@@ -9,7 +9,15 @@ import { isFarmIssuer } from '@/inventory/issuer';
  * single-letter tags, so they are not queryable and must be applied here.
  */
 
-export type IssuerScope = 'all' | 'official' | 'external';
+/**
+ * Issuer scopes.
+ *
+ * `mine` is about the CONNECTED SIGNER, not about the Farm. A signer can own
+ * plenty of items that are not official Farm items, and the official issuer is
+ * somebody else's key unless you happen to hold it — so "editable by me" and
+ * "Official Farm Item" are independent questions and must never be conflated.
+ */
+export type IssuerScope = 'all' | 'mine' | 'official' | 'external';
 
 export interface RegistryFilters {
   /** Free text matched against name, `d` and address. */
@@ -37,9 +45,21 @@ function matchesSearch(item: GameItemDefinition, query: string): boolean {
   );
 }
 
-export function matchesFilters(item: GameItemDefinition, filters: RegistryFilters): boolean {
+export interface FilterContext {
+  /** The connected signer, needed only by the `mine` scope. */
+  signerPubkey?: string | null;
+}
+
+export function matchesFilters(
+  item: GameItemDefinition,
+  filters: RegistryFilters,
+  context: FilterContext = {}
+): boolean {
   if (!matchesSearch(item, filters.search)) return false;
 
+  // `mine` reuses the same predicate that decides whether Edit is offered, so
+  // the filter can never disagree with the affordance on the row.
+  if (filters.issuer === 'mine' && !canEditItem(context.signerPubkey, item.issuer)) return false;
   if (filters.issuer === 'official' && !isFarmIssuer(item.issuer)) return false;
   if (filters.issuer === 'external' && isFarmIssuer(item.issuer)) return false;
 
@@ -54,8 +74,20 @@ export function matchesFilters(item: GameItemDefinition, filters: RegistryFilter
   return true;
 }
 
-export function applyFilters(items: readonly GameItemDefinition[], filters: RegistryFilters): GameItemDefinition[] {
-  return items.filter((item) => matchesFilters(item, filters));
+export function applyFilters(
+  items: readonly GameItemDefinition[],
+  filters: RegistryFilters,
+  context: FilterContext = {}
+): GameItemDefinition[] {
+  return items.filter((item) => matchesFilters(item, filters, context));
+}
+
+/** How many of these items the connected signer could edit in place. */
+export function countEditable(
+  items: readonly GameItemDefinition[],
+  signerPubkey: string | null | undefined
+): number {
+  return items.filter((item) => canEditItem(signerPubkey, item.issuer)).length;
 }
 
 /** Distinct non-empty values of a facet, sorted, for building filter dropdowns. */

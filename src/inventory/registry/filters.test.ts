@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { parseGameItemDefinition, type GameItemDefinition } from '@/inventory/package';
 import { FARM_OFFICIAL_ISSUER_PUBKEY } from '@/inventory/constants';
-import { applyFilters, blankFilters, facetValues, matchesFilters, sortForDisplay } from './filters';
+import { applyFilters, blankFilters, countEditable, facetValues, matchesFilters, sortForDisplay } from './filters';
 
 const EXTERNAL = 'b'.repeat(64);
 
@@ -108,5 +108,53 @@ describe('same d under two issuers', () => {
     expect(matchesFilters(mine, { ...blankFilters(), issuer: 'official' })).toBe(true);
     expect(matchesFilters(theirs, { ...blankFilters(), issuer: 'official' })).toBe(false);
     expect(applyFilters([mine, theirs], { ...blankFilters(), search: 'shared:d' })).toHaveLength(2);
+  });
+});
+
+describe('editable-by-me scope', () => {
+  it('selects items the signer issued, whatever their official status', () => {
+    // The signer here IS the Farm issuer, so both official items match.
+    expect(applyFilters(all, { ...blankFilters(), issuer: 'mine' }, { signerPubkey: FARM_OFFICIAL_ISSUER_PUBKEY })).toEqual([
+      carrot,
+      hoe,
+    ]);
+  });
+
+  it('is about the signer, not about being an official Farm item', () => {
+    // A signer who is NOT the Farm issuer sees only their own external item.
+    const mine = applyFilters(all, { ...blankFilters(), issuer: 'mine' }, { signerPubkey: EXTERNAL });
+    expect(mine).toEqual([stranger]);
+
+    // ...which the official filter excludes, and the external filter includes.
+    expect(applyFilters(mine, { ...blankFilters(), issuer: 'official' })).toEqual([]);
+    expect(applyFilters(mine, { ...blankFilters(), issuer: 'external' })).toEqual([stranger]);
+  });
+
+  it('matches nothing when signed out', () => {
+    expect(applyFilters(all, { ...blankFilters(), issuer: 'mine' }, { signerPubkey: null })).toEqual([]);
+    expect(applyFilters(all, { ...blankFilters(), issuer: 'mine' })).toEqual([]);
+  });
+
+  it('combines with the other filters', () => {
+    expect(
+      applyFilters(all, { ...blankFilters(), issuer: 'mine', type: 'tool' }, { signerPubkey: FARM_OFFICIAL_ISSUER_PUBKEY })
+    ).toEqual([hoe]);
+  });
+
+  it('agrees with the per-row edit affordance', () => {
+    for (const item of all) {
+      const editableByFarm = matchesFilters(item, { ...blankFilters(), issuer: 'mine' }, {
+        signerPubkey: FARM_OFFICIAL_ISSUER_PUBKEY,
+      });
+      expect(editableByFarm).toBe(item.issuer === FARM_OFFICIAL_ISSUER_PUBKEY);
+    }
+  });
+});
+
+describe('countEditable', () => {
+  it('counts only the signer own items', () => {
+    expect(countEditable(all, FARM_OFFICIAL_ISSUER_PUBKEY)).toBe(2);
+    expect(countEditable(all, EXTERNAL)).toBe(1);
+    expect(countEditable(all, null)).toBe(0);
   });
 });

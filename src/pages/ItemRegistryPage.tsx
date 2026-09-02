@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useSeoMeta } from '@unhead/react';
 import { Link } from 'react-router-dom';
-import { FileJson, Loader2, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Copy, FileJson, Loader2, Pencil, RefreshCw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -35,7 +35,14 @@ import {
   type ImportMode,
   type ImportedEvent,
 } from '@/inventory/registry/form-event';
-import { applyFilters, blankFilters, facetValues, sortForDisplay, type RegistryFilters } from '@/inventory/registry/filters';
+import {
+  applyFilters,
+  blankFilters,
+  countEditable,
+  facetValues,
+  sortForDisplay,
+  type RegistryFilters,
+} from '@/inventory/registry/filters';
 
 /**
  * The Game Item Registry / Item Studio.
@@ -61,16 +68,18 @@ export default function ItemRegistryPage() {
   const [reviewOpen, setReviewOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [result, setResult] = useState<PublishItemDefinitionResult | null>(null);
+  const [justPublished, setJustPublished] = useState<string | null>(null);
 
   const definitions = useItemDefinitions(scope);
   const upload = useItemImageUpload();
   const publish = usePublishItemDefinition();
 
-  const items = useMemo(
-    () => sortForDisplay(applyFilters((definitions.data ?? []).map((record) => record.definition), filters)),
-    [definitions.data, filters]
-  );
   const allItems = useMemo(() => (definitions.data ?? []).map((record) => record.definition), [definitions.data]);
+  const items = useMemo(
+    () => sortForDisplay(applyFilters(allItems, filters, { signerPubkey: user?.pubkey ?? null })),
+    [allItems, filters, user?.pubkey]
+  );
+  const editableCount = useMemo(() => countEditable(allItems, user?.pubkey ?? null), [allItems, user?.pubkey]);
 
   const built = useMemo(() => formToUnsignedEvent(form), [form]);
   const address = formAddress(form, user?.pubkey ?? null);
@@ -85,7 +94,10 @@ export default function ItemRegistryPage() {
 
   // Identity is not left to a disabled input: a `d` change on a loaded item is
   // refused here too.
-  const updateForm = (next: ItemFormState) => setForm((current) => applyFormEdit(current, next, signerPubkey));
+  const updateForm = (next: ItemFormState) => {
+    setJustPublished(null);
+    setForm((current) => applyFormEdit(current, next, signerPubkey));
+  };
 
   const copyAddress = async (value: string) => {
     try {
@@ -98,16 +110,30 @@ export default function ItemRegistryPage() {
 
   const loadIntoEditor = (item: GameItemDefinition, derive: boolean) => {
     const record = (definitions.data ?? []).find((entry) => entry.address === item.address);
-    if (!record) return;
+    if (!record) {
+      toast({
+        variant: 'destructive',
+        title: 'Could not open that item',
+        description: 'Its event is no longer in the loaded results. Refresh and try again.',
+      });
+      return;
+    }
 
+    // The editor always starts from the published EVENT, not from the parsed
+    // summary on the card, so unknown tags and raw content survive the edit.
     const loaded = eventToForm(record.event, record.relays);
     if (!loaded.ok) {
       toast({ variant: 'destructive', title: 'Could not load item', description: loaded.error });
       return;
     }
+
     setForm(derive ? deriveAsNewItem(loaded.value.form) : loaded.value.form);
     setResult(null);
+    setJustPublished(null);
     setTab('create');
+    if (loaded.value.warnings.length > 0) {
+      toast({ title: 'Loaded with warnings', description: loaded.value.warnings.join('; ') });
+    }
   };
 
   /**
@@ -118,6 +144,7 @@ export default function ItemRegistryPage() {
   const handleImported = (imported: ImportedEvent, mode: ImportMode) => {
     setForm(imported.form);
     setResult(null);
+    setJustPublished(null);
     setTab('create');
     toast({
       title: mode === 'existing' ? 'Loaded for editing' : 'Imported as a new item',
@@ -133,11 +160,21 @@ export default function ItemRegistryPage() {
   const doPublish = async () => {
     if (!built.ok) return;
     try {
+      const wasEditing = isEditing;
       const published = await publish.mutateAsync({ template: built.value });
       setResult(published);
+
       if (published.reachedAnyRelay) {
+        // The mutation already folded the signed event into the caches, so the
+        // list is correct before this returns; the refetch just reconciles with
+        // the relays and cannot move the address backwards (see
+        // `mergeNewestRecords`).
         definitions.refetch();
-        toast({ title: 'Published', description: published.record?.address ?? '' });
+        setJustPublished(published.record?.address ?? null);
+        toast({
+          title: wasEditing ? 'Item updated' : 'Item published',
+          description: published.record?.address ?? '',
+        });
       }
     } catch (error) {
       toast({ variant: 'destructive', title: 'Publish failed', description: (error as Error).message });
@@ -201,10 +238,24 @@ export default function ItemRegistryPage() {
                     onChange={(issuer) => setFilters({ ...filters, issuer: issuer as RegistryFilters['issuer'] })}
                     options={[
                       { value: 'all', label: 'Any' },
+                      ...(user ? [{ value: 'mine', label: 'Editable by me' }] : []),
                       { value: 'official', label: 'Official Farm' },
                       { value: 'external', label: 'External' },
                     ]}
                   />
+
+                  {user && (
+                    <Button
+                      variant={filters.issuer === 'mine' ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() =>
+                        setFilters({ ...filters, issuer: filters.issuer === 'mine' ? 'all' : 'mine' })
+                      }
+                    >
+                      <Pencil className="mr-2 h-4 w-4" />
+                      My items ({editableCount})
+                    </Button>
+                  )}
 
                   <Button variant="outline" size="icon" onClick={() => definitions.refetch()} aria-label="Refresh">
                     <RefreshCw className="h-4 w-4" />
@@ -292,6 +343,7 @@ export default function ItemRegistryPage() {
                       onClick={() => {
                         setForm(blankItemForm());
                         setResult(null);
+                        setJustPublished(null);
                       }}
                     >
                       Start blank
@@ -310,9 +362,44 @@ export default function ItemRegistryPage() {
                   </p>
                 )}
                 {isEditing && (
-                  <p className="rounded border border-sky-500/40 bg-sky-500/10 p-2 text-xs">
-                    Editing <code className="break-all">{form.loaded?.address}</code>. Re-publishing replaces it.
-                  </p>
+                  <div className="space-y-1 rounded border border-sky-500/40 bg-sky-500/10 p-2 text-xs">
+                    <p className="font-medium">Editing an existing item definition.</p>
+                    <p className="flex flex-wrap items-center gap-1">
+                      <code className="break-all">{form.loaded?.address}</code>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-5 px-1 text-xs"
+                        onClick={() => form.loaded && copyAddress(form.loaded.address)}
+                      >
+                        <Copy className="mr-1 h-3 w-3" />
+                        Copy
+                      </Button>
+                    </p>
+                    <p className="text-muted-foreground">
+                      Publishing updates this address in place — it does not create a new item. The item id is fixed
+                      because it is half of that address.
+                    </p>
+                  </div>
+                )}
+                {justPublished && (
+                  <div className="flex flex-wrap items-center gap-2 rounded border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs">
+                    <span className="font-medium">Published.</span>
+                    <code className="break-all">{justPublished}</code>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-2 text-xs"
+                      onClick={() => {
+                        setFilters({ ...blankFilters(), search: justPublished.split(':').slice(2).join(':') });
+                        setJustPublished(null);
+                        setTab('browse');
+                      }}
+                    >
+                      <ArrowLeft className="mr-1 h-3 w-3" />
+                      Show in registry
+                    </Button>
+                  </div>
                 )}
                 {!user && (
                   <p className="rounded border border-muted bg-muted/40 p-2 text-xs text-muted-foreground">

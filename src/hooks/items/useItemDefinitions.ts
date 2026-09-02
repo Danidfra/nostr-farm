@@ -1,4 +1,4 @@
-import { useQuery, type QueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { useNostr } from '@nostrify/react';
 import type { NostrEvent } from '@nostrify/nostrify';
 
@@ -112,6 +112,55 @@ export function collectDefinitions(results: readonly RelayQueryResult[]): ItemDe
 }
 
 /**
+ * Fold a fresh relay result over what the cache already holds, keeping the
+ * newest event per address.
+ *
+ * Without this, a refetch immediately after publishing an update would REVERT
+ * the list: relays need a moment to index, so the refetch legitimately returns
+ * the previous version of the definition, and a plain replacement would drop
+ * the edit the user just made and show the stale metadata back to them. The
+ * rule is the same one `upsertDefinitionRecord` states — an address never moves
+ * backwards in time — applied to whole result sets.
+ *
+ * Addresses that only exist in the cache are kept, because a refetch that no
+ * longer sees them has not proven they are gone; addresses that only exist in
+ * the incoming set are added.
+ */
+/**
+ * The whole read pipeline: relay answers folded over what the cache holds.
+ *
+ * Exported as one function so the query's behaviour can be tested without
+ * mounting anything — the hook adds only the cache lookup around this call.
+ *
+ * @throws {AllRelaysFailedError} when every relay failed.
+ */
+export function reconcileDefinitions(
+  previous: readonly ItemDefinitionRecord[] | undefined,
+  results: readonly RelayQueryResult[]
+): ItemDefinitionRecord[] {
+  return mergeNewestRecords(previous, collectDefinitions(results));
+}
+
+export function mergeNewestRecords(
+  previous: readonly ItemDefinitionRecord[] | undefined,
+  incoming: readonly ItemDefinitionRecord[]
+): ItemDefinitionRecord[] {
+  if (!previous || previous.length === 0) return [...incoming];
+
+  const byAddress = new Map<string, ItemDefinitionRecord>();
+  for (const record of previous) byAddress.set(record.address, record);
+
+  for (const record of incoming) {
+    const existing = byAddress.get(record.address);
+    if (!existing || record.event.created_at > existing.event.created_at) {
+      byAddress.set(record.address, record);
+    }
+  }
+
+  return [...byAddress.values()];
+}
+
+/**
  * Read kind:31632 definitions for the registry.
  *
  * Scope decides what is asked of the relays, and the default is deliberately
@@ -126,6 +175,7 @@ export function collectDefinitions(results: readonly RelayQueryResult[]): ItemDe
  */
 export function useItemDefinitions(scope: RegistryScope, topics: readonly string[] = []) {
   const { nostr } = useNostr();
+  const queryClient = useQueryClient();
 
   return useQuery<ItemDefinitionRecord[]>({
     queryKey: itemDefinitionsQueryKey(scope, topics),
@@ -156,7 +206,10 @@ export function useItemDefinitions(scope: RegistryScope, topics: readonly string
         })
       );
 
-      return collectDefinitions(results);
+      // Merged rather than replaced, so a refetch racing a just-published
+      // update cannot show the stale version back to the author.
+      const queryKey = itemDefinitionsQueryKey(scope, topics);
+      return reconcileDefinitions(queryClient.getQueryData<ItemDefinitionRecord[]>(queryKey), results);
     },
   });
 }
