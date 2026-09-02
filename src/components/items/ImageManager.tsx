@@ -4,10 +4,9 @@ import { Loader2, Trash2, Upload } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { MARKER_OPTIONS, PRIMARY_MARKER, blankImageRow, type ImageRow } from '@/inventory/registry/form-model';
-import { SUGGESTABLE_MARKERS } from '@/inventory/registry/image-upload';
+import { PRIMARY_MARKER, blankImageRow, type ImageRow } from '@/inventory/registry/form-model';
 import type { ItemImageUploadApi } from '@/hooks/items/useItemImageUpload';
+import { MarkerSelect } from './MarkerSelect';
 
 interface ImageManagerProps {
   rows: ImageRow[];
@@ -15,8 +14,6 @@ interface ImageManagerProps {
   upload: ItemImageUploadApi;
   canUpload: boolean;
 }
-
-const MARKER_LABEL = (marker: string) => (marker === PRIMARY_MARKER ? 'primary (unmarked)' : marker);
 
 /**
  * Image rows plus the Blossom upload queue.
@@ -77,21 +74,12 @@ export function ImageManager({ rows, onChange, upload, canUpload }: ImageManager
             aria-label={`Image URL ${index + 1}`}
             onChange={(e) => onChange(rows.map((r) => (r.id === row.id ? { ...r, url: e.target.value } : r)))}
           />
-          <Select
+          <MarkerSelect
+            className="w-52"
+            label={`Marker ${index + 1}`}
             value={row.marker}
-            onValueChange={(marker) => onChange(rows.map((r) => (r.id === row.id ? { ...r, marker } : r)))}
-          >
-            <SelectTrigger className="w-52" aria-label={`Marker ${index + 1}`}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {MARKER_OPTIONS.map((marker) => (
-                <SelectItem key={marker || 'primary'} value={marker || PRIMARY_MARKER}>
-                  {MARKER_LABEL(marker)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            onChange={(marker) => onChange(rows.map((r) => (r.id === row.id ? { ...r, marker } : r)))}
+          />
           <Button
             type="button"
             size="icon"
@@ -131,18 +119,12 @@ export function ImageManager({ rows, onChange, upload, canUpload }: ImageManager
             {upload.entries.map((entry) => (
               <div key={entry.id} className="flex items-center gap-2 text-xs">
                 <span className="w-40 truncate" title={entry.filename}>{entry.filename}</span>
-                <Select value={entry.marker} onValueChange={(marker) => upload.setMarker(entry.id, marker)}>
-                  <SelectTrigger className="h-7 w-48" aria-label={`Marker for ${entry.filename}`}>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {SUGGESTABLE_MARKERS.map((marker) => (
-                      <SelectItem key={marker || 'primary'} value={marker || PRIMARY_MARKER}>
-                        {MARKER_LABEL(marker)}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <MarkerSelect
+                  className="h-7 w-48"
+                  label={`Marker for ${entry.filename}`}
+                  value={entry.marker}
+                  onChange={(marker) => upload.setMarker(entry.id, marker)}
+                />
                 <span className={entry.status === 'error' ? 'text-destructive' : 'text-muted-foreground'}>
                   {entry.status === 'error' ? entry.error : entry.status}
                 </span>

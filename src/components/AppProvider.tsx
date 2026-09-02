@@ -2,6 +2,7 @@ import { ReactNode, useEffect } from 'react';
 import { z } from 'zod';
 import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { AppContext, type AppConfig, type AppContextType, type Theme, type RelayMetadata } from '@/contexts/AppContext';
+import { applyThemeClass, resolveTheme } from '@/lib/theme';
 
 interface AppProviderProps {
   children: ReactNode;
@@ -70,42 +71,22 @@ export function AppProvider(props: AppProviderProps) {
 }
 
 /**
- * Hook to apply theme changes to the document root
+ * Keep the document root in sync with the chosen theme.
+ *
+ * One class on `<html>` drives every surface, because Tailwind is configured
+ * with `darkMode: ["class"]`. In `system` mode the media query is also watched,
+ * so the app follows the OS switching without a reload.
  */
 function useApplyTheme(theme: Theme) {
   useEffect(() => {
     const root = window.document.documentElement;
+    const media = window.matchMedia?.('(prefers-color-scheme: dark)');
 
-    root.classList.remove('light', 'dark');
+    const apply = () => applyThemeClass(root, resolveTheme(theme, media?.matches ?? false));
+    apply();
 
-    if (theme === 'system') {
-      const systemTheme = window.matchMedia('(prefers-color-scheme: dark)')
-        .matches
-        ? 'dark'
-        : 'light';
-
-      root.classList.add(systemTheme);
-      return;
-    }
-
-    root.classList.add(theme);
-  }, [theme]);
-
-  // Handle system theme changes when theme is set to "system"
-  useEffect(() => {
-    if (theme !== 'system') return;
-
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-
-    const handleChange = () => {
-      const root = window.document.documentElement;
-      root.classList.remove('light', 'dark');
-
-      const systemTheme = mediaQuery.matches ? 'dark' : 'light';
-      root.classList.add(systemTheme);
-    };
-
-    mediaQuery.addEventListener('change', handleChange);
-    return () => mediaQuery.removeEventListener('change', handleChange);
+    if (theme !== 'system' || !media?.addEventListener) return;
+    media.addEventListener('change', apply);
+    return () => media.removeEventListener('change', apply);
   }, [theme]);
 }

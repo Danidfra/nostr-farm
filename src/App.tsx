@@ -12,6 +12,7 @@ import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { AppConfig } from '@/contexts/AppContext';
 import { GAME_RELAYS } from '@/nostr/relays';
+import { APP_CONFIG_STORAGE_KEY } from '@/lib/theme-storage';
 import AppRouter from './AppRouter';
 
 const head = createHead({ plugins: [InferSeoMetaPlugin()] });
@@ -27,7 +28,7 @@ const queryClient = new QueryClient({
 });
 
 const defaultConfig: AppConfig = {
-  theme: 'light',
+  theme: 'system',
   relayMetadata: {
     relays: GAME_RELAYS.map((relay) => ({ url: relay.url, read: true, write: true })),
     updatedAt: 0,
@@ -37,7 +38,7 @@ const defaultConfig: AppConfig = {
 export function App() {
   return (
     <UnheadProvider head={head}>
-      <AppProvider storageKey="nostr-worlds:app-config" defaultConfig={defaultConfig}>
+      <AppProvider storageKey={APP_CONFIG_STORAGE_KEY} defaultConfig={defaultConfig}>
         <QueryClientProvider client={queryClient}>
           <NostrLoginProvider storageKey="nostr-worlds:login">
             <NostrProvider>

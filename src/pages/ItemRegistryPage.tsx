@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useSeoMeta } from '@unhead/react';
 import { Link } from 'react-router-dom';
-import { Loader2, RefreshCw } from 'lucide-react';
+import { FileJson, Loader2, RefreshCw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -11,8 +11,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { LoginArea } from '@/components/auth/LoginArea';
+import { ThemeToggle } from '@/components/ThemeToggle';
 import { ItemCard } from '@/components/items/ItemCard';
 import { ItemForm } from '@/components/items/ItemForm';
+import { ImportEventDialog } from '@/components/items/ImportEventDialog';
 import { IssuerBadge } from '@/components/items/IssuerBadge';
 import { PublishReviewDialog } from '@/components/items/PublishReviewDialog';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
@@ -30,6 +32,8 @@ import {
   formToUnsignedEvent,
   isInPlaceEdit,
   lockedItemId,
+  type ImportMode,
+  type ImportedEvent,
 } from '@/inventory/registry/form-event';
 import { applyFilters, blankFilters, facetValues, sortForDisplay, type RegistryFilters } from '@/inventory/registry/filters';
 
@@ -55,6 +59,7 @@ export default function ItemRegistryPage() {
   const [tab, setTab] = useState('browse');
   const [form, setForm] = useState<ItemFormState>(blankItemForm);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [result, setResult] = useState<PublishItemDefinitionResult | null>(null);
 
   const definitions = useItemDefinitions(scope);
@@ -105,6 +110,21 @@ export default function ItemRegistryPage() {
     setTab('create');
   };
 
+  /**
+   * Adopt an imported event. `applyFormEdit` is bypassed on purpose: this
+   * replaces the whole form rather than editing the current one, and the
+   * imported form already carries the right provenance for its mode.
+   */
+  const handleImported = (imported: ImportedEvent, mode: ImportMode) => {
+    setForm(imported.form);
+    setResult(null);
+    setTab('create');
+    toast({
+      title: mode === 'existing' ? 'Loaded for editing' : 'Imported as a new item',
+      description: imported.warnings.length > 0 ? imported.warnings.join('; ') : imported.form.d,
+    });
+  };
+
   const openReview = () => {
     setResult(null);
     setReviewOpen(true);
@@ -137,6 +157,7 @@ export default function ItemRegistryPage() {
         </div>
         <div className="flex items-center gap-3">
           {user ? <IssuerBadge pubkey={user.pubkey} /> : null}
+          <ThemeToggle />
           <LoginArea />
         </div>
       </header>
@@ -260,6 +281,10 @@ export default function ItemRegistryPage() {
               <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
                 <CardTitle className="text-base">{isEditing ? 'Edit item definition' : 'New item definition'}</CardTitle>
                 <div className="flex items-center gap-2">
+                  <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
+                    <FileJson className="mr-2 h-4 w-4" />
+                    Import JSON
+                  </Button>
                   {form.loaded && (
                     <Button
                       size="sm"
@@ -306,6 +331,13 @@ export default function ItemRegistryPage() {
           </TabsContent>
         </Tabs>
       </main>
+
+      <ImportEventDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        signerPubkey={signerPubkey}
+        onImported={handleImported}
+      />
 
       <PublishReviewDialog
         open={reviewOpen}

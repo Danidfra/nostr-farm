@@ -475,3 +475,144 @@ export function deriveAsNewItem(form: ItemFormState): ItemFormState {
       : form.basedOn,
   };
 }
+
+// --- JSON import -----------------------------------------------------------
+
+/** How an imported event should be treated for identity purposes. */
+export type ImportMode = 'template' | 'existing';
+
+export interface ImportedEvent {
+  form: ItemFormState;
+  warnings: string[];
+  /** What the pasted JSON actually was. */
+  source: {
+    /** A complete signed event (has id, pubkey, created_at and sig). */
+    isSignedEvent: boolean;
+    /** The author, when the JSON carried one. */
+    pubkey?: string;
+    /** The `31632:<pubkey>:<d>` address, when an author was present. */
+    address?: string;
+  };
+  /**
+   * Whether "load as existing" is offered: only for a complete signed event
+   * whose author IS the connected signer. Anything else can only be imported
+   * as a template, because nothing else establishes that this is a definition
+   * the signer can actually replace.
+   */
+  canLoadAsExisting: boolean;
+}
+
+export interface ImportEventJsonOptions {
+  /** The connected signer, used only to decide {@link ImportedEvent.canLoadAsExisting}. */
+  signerPubkey?: string | null;
+  /** Defaults to `template`, the safe reading of a pasted blob. */
+  mode?: ImportMode;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isTagArray(value: unknown): value is string[][] {
+  return Array.isArray(value) && value.every((tag) => Array.isArray(tag) && tag.every((v) => typeof v === 'string'));
+}
+
+/**
+ * Load a pasted kind:31632 event into the editor.
+ *
+ * Accepts both a full signed event and a bare `{kind, content, tags}` template.
+ * There is NO second parser here: the JSON is shaped into the event form and
+ * handed to {@link eventToForm}, so tag handling, image markers, unknown-tag
+ * preservation and content preservation are the same code the registry already
+ * uses.
+ *
+ * Importing never signs and never publishes.
+ *
+ * IDENTITY. The default is `template`: a pasted blob is authoring input, not
+ * proof that the signer owns a published definition, and locking `d` merely
+ * because the JSON contains a `pubkey` would be wrong — anyone can paste
+ * anyone's event. `existing` is honoured only when the JSON is a complete
+ * signed event authored by the connected signer; otherwise it is downgraded to
+ * `template` rather than silently trusted.
+ */
+export function importEventJson(
+  raw: string,
+  options: ImportEventJsonOptions = {}
+): ConversionResult<ImportedEvent> {
+  const text = raw.trim();
+  if (text === '') return { ok: false, error: 'Paste a kind:31632 event JSON first.' };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    return { ok: false, error: `Not valid JSON: ${(error as Error).message}` };
+  }
+
+  if (!isRecord(parsed)) {
+    return { ok: false, error: 'Expected a JSON object describing an event.' };
+  }
+
+  const kind = parsed.kind;
+  if (typeof kind !== 'number') {
+    return { ok: false, error: 'Missing a numeric `kind`. Paste a Nostr event object.' };
+  }
+  if (kind !== KIND_GAME_ITEM_DEFINITION) {
+    return {
+      ok: false,
+      error: `Expected kind ${KIND_GAME_ITEM_DEFINITION} (Game Item Definition), got kind ${kind}.`,
+    };
+  }
+  if (!isTagArray(parsed.tags)) {
+    return { ok: false, error: '`tags` must be an array of string arrays.' };
+  }
+  if (parsed.content !== undefined && typeof parsed.content !== 'string') {
+    return { ok: false, error: '`content` must be a string.' };
+  }
+
+  const pubkey = typeof parsed.pubkey === 'string' && /^[0-9a-f]{64}$/.test(parsed.pubkey) ? parsed.pubkey : undefined;
+  const createdAt = typeof parsed.created_at === 'number' ? parsed.created_at : 0;
+  const eventId = typeof parsed.id === 'string' ? parsed.id : '';
+  const isSignedEvent =
+    typeof parsed.sig === 'string' && parsed.sig !== '' && eventId !== '' && pubkey !== undefined && createdAt > 0;
+
+  // `eventToForm` needs an author to compute the address; a template has none,
+  // so a placeholder is used and the resulting provenance is discarded below.
+  const loaded = eventToForm(
+    {
+      id: eventId,
+      pubkey: pubkey ?? '0'.repeat(64),
+      created_at: createdAt,
+      kind,
+      tags: parsed.tags,
+      content: typeof parsed.content === 'string' ? parsed.content : '',
+    },
+    []
+  );
+  if (!loaded.ok) return loaded;
+
+  const signerPubkey = options.signerPubkey ?? null;
+  const canLoadAsExisting = isSignedEvent && pubkey !== undefined && pubkey === signerPubkey;
+  const mode: ImportMode = options.mode === 'existing' && canLoadAsExisting ? 'existing' : 'template';
+
+  const form: ItemFormState =
+    mode === 'existing'
+      ? loaded.value.form
+      : // Template: no provenance, so `d` stays editable and nothing claims a
+        // re-publish would replace an existing definition.
+        { ...loaded.value.form, loaded: null };
+
+  return {
+    ok: true,
+    value: {
+      form,
+      warnings: loaded.value.warnings,
+      source: {
+        isSignedEvent,
+        pubkey,
+        address: pubkey ? buildGameItemAddress(pubkey, loaded.value.form.d) : undefined,
+      },
+      canLoadAsExisting,
+    },
+  };
+}

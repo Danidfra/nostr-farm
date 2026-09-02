@@ -7,6 +7,7 @@ import { useLoginActions } from '@/hooks/useLoginActions';
 import { genUserName } from '@/lib/genUserName';
 import { formatRenderpackRef, type RenderpackRef } from '@/world/renderpack/registry';
 import { ITEM_REGISTRY_ROUTE } from '@/inventory/routes';
+import { ThemeToggle } from '@/components/ThemeToggle';
 
 interface FarmTopBarProps {
   farmName?: string;
@@ -38,6 +39,8 @@ export function FarmTopBar({ farmName, renderpack }: FarmTopBarProps) {
             Items
           </Link>
         </Button>
+
+        <ThemeToggle />
 
         {user && (
           <>
