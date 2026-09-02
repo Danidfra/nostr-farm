@@ -1,5 +1,5 @@
 import type { NostrEvent, NPool } from '@nostrify/nostrify';
-import type { RelayConfig } from './config';
+import type { RelayConfig } from './relays';
 
 /**
  * Result of publishing to relays
@@ -45,7 +45,7 @@ export class PublishError extends Error {
 export async function publishToRelays(
   nostr: NPool,
   event: NostrEvent,
-  relays: RelayConfig[],
+  relays: readonly RelayConfig[],
   timeout: number = 5000
 ): Promise<PublishResult> {
   if (relays.length === 0) {

@@ -2,8 +2,8 @@ import { useNostr } from "@nostrify/react";
 import { useMutation, type UseMutationResult } from "@tanstack/react-query";
 
 import { useCurrentUser } from "./useCurrentUser";
-import { publishToRelays } from "@/lib/nostr/publish";
-import { GAME_RELAYS } from "@/lib/nostr/config";
+import { publishToRelays } from "@/nostr/publish";
+import { GAME_RELAYS } from "@/nostr/relays";
 
 import type { NostrEvent } from "@nostrify/nostrify";
 
