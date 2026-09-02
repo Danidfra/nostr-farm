@@ -3,7 +3,12 @@ import { join, relative } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
+// This file is on the boundary allowlist, so it may import the package
+// directly — which is what lets it prove the re-export IS the package.
+import * as protocolPackage from '@nostr-games/inventory';
+
 import { createNullInventoryAdapter } from './adapter';
+import * as boundary from './package';
 import { FARM_INVENTORY_CONTEXT, INVENTORY_KINDS, inventoryPackageStatus } from './package';
 
 const SRC = join(process.cwd(), 'src');
@@ -27,6 +32,17 @@ describe('inventory boundary', () => {
       .filter((f) => stripComments(readFileSync(f, 'utf8')).includes('@nostr-games/inventory'));
 
     expect(offenders.map((f) => relative(process.cwd(), f))).toEqual([]);
+  });
+
+  it('re-exports the package implementations rather than local copies', () => {
+    // Identity, not shape: a local re-implementation with the same behaviour
+    // would pass a behavioural test and fail this one.
+    expect(boundary.buildGameItemDefinitionFilter).toBe(protocolPackage.buildGameItemDefinitionFilter);
+    expect(boundary.buildGameItemDefinitionEvent).toBe(protocolPackage.buildGameItemDefinitionEvent);
+    expect(boundary.parseGameItemDefinitionResult).toBe(protocolPackage.parseGameItemDefinitionResult);
+    expect(boundary.getPrimaryItemImage).toBe(protocolPackage.getPrimaryItemImage);
+    expect(boundary.buildGameItemAddress).toBe(protocolPackage.buildGameItemAddress);
+    expect(boundary.validateGameItemDefinition).toBe(protocolPackage.validateGameItemDefinition);
   });
 
   it('routes every registry module through the boundary re-export', () => {

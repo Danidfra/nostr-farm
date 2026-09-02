@@ -31,8 +31,9 @@ export {
   getItemImageByMarker,
   isGameItemImageMarker,
 
-  // Event construction.
+  // Event construction and querying.
   buildGameItemDefinitionEvent,
+  buildGameItemDefinitionFilter,
 } from '@nostr-games/inventory';
 
 export type {
@@ -43,67 +44,13 @@ export type {
   GameItemBasedOnReference,
   GameItemAddress,
   BuildGameItemDefinitionInput,
+  BuildGameItemDefinitionFilterOptions,
+  GameItemDefinitionFilter,
   ItemDefinitionValidationResult,
   ItemDefinitionValidationIssue,
   UnsignedEventTemplate,
   ParseWarning,
 } from '@nostr-games/inventory';
-
-import { KIND_GAME_ITEM_DEFINITION } from '@nostr-games/inventory';
-
-/**
- * A Nostr filter for kind:31632 events.
- *
- * SHIM. `@nostr-games/inventory` has `buildGameItemDefinitionFilter` in its
- * source tree, but the published 0.3.0 does not export it — only the
- * placement equivalent shipped. Rather than depend on an unpublished local
- * checkout, the Farm builds the filter here and deletes this the moment a
- * release exports it. The shape is deliberately identical to the package's.
- *
- * `authors` and `itemIds` intersect, so a single call is only correct for one
- * issuer at a time: several issuers plus several `d` values would also match
- * the cross product — issuer A's definition of issuer B's `d`. Two issuers
- * using the same `d` are two DIFFERENT items, so always verify the resolved
- * address rather than assuming the relay narrowed it.
- */
-export interface GameItemDefinitionFilter {
-  kinds: [typeof KIND_GAME_ITEM_DEFINITION];
-  authors?: string[];
-  '#d'?: string[];
-  '#t'?: string[];
-}
-
-export interface BuildGameItemDefinitionFilterOptions {
-  authors?: string[];
-  itemIds?: string[];
-  topics?: string[];
-}
-
-function uniqueNonBlank(values: readonly string[] | undefined): string[] {
-  if (!values) return [];
-  const seen = new Set<string>();
-  for (const value of values) {
-    if (typeof value === 'string' && value.trim() !== '') seen.add(value);
-  }
-  return [...seen];
-}
-
-export function buildGameItemDefinitionFilter(
-  options: BuildGameItemDefinitionFilterOptions = {}
-): GameItemDefinitionFilter {
-  const filter: GameItemDefinitionFilter = { kinds: [KIND_GAME_ITEM_DEFINITION] };
-
-  const authors = uniqueNonBlank(options.authors);
-  if (authors.length > 0) filter.authors = authors;
-
-  const itemIds = uniqueNonBlank(options.itemIds);
-  if (itemIds.length > 0) filter['#d'] = itemIds;
-
-  const topics = uniqueNonBlank(options.topics);
-  if (topics.length > 0) filter['#t'] = topics;
-
-  return filter;
-}
 
 /** Kinds defined by the inventory protocol. */
 export const INVENTORY_KINDS = {

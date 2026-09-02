@@ -152,10 +152,3 @@ tell you what actually reached the network.
 
 On success the caches are updated so the item appears immediately, and its full
 address is shown with a copy button.
-
-## Known protocol gap
-
-`@nostr-games/inventory@0.3.0` ships `buildGameItemPlacementFilter` but not
-`buildGameItemDefinitionFilter`, although the latter exists in the package's
-source tree. `src/inventory/package.ts` carries a small local shim with the
-identical shape, marked for deletion as soon as a release exports it.
