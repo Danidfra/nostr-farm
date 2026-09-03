@@ -145,17 +145,52 @@ export type FarmInventoryLoad =
   | { status: 'error'; error: string };
 
 /** Upper bound on by-id fetch rounds while walking an unusually deep chain. */
-const MAX_FOLD_FETCH_ROUNDS = 8;
+export const MAX_FOLD_FETCH_ROUNDS = 8;
+
+/**
+ * Resolve, and while the chain is `unresolved` for want of a manifest, fetch
+ * the named ids from the configured relays and the relay hints the chain
+ * carries, then resolve again.
+ *
+ * Stops when resolved, when nothing is missing (an invalid or foreign manifest
+ * is not going to become valid by fetching it again), or when a round finds
+ * nothing new. An unresolved chain is reported, never guessed around.
+ *
+ * Shared by the authoritative load (`loadFarmInventoryState`) and by the live
+ * read side, which runs it against whatever ledger a newer snapshot arrived
+ * into. Returns every manifest it ended up holding so a caller can keep them.
+ */
+export async function resolveWithMissingFolds(
+  readFoldsById: FarmInventoryReadDeps['readFoldsById'],
+  snapshot: GameInventory,
+  folds: readonly NostrEvent[],
+  spends: readonly NostrEvent[]
+): Promise<FarmInventoryResolution> {
+  let known = dedupeEventsById(folds);
+  let resolution = resolveFarmInventory({ snapshot, folds: known, spends });
+
+  for (let round = 0; round < MAX_FOLD_FETCH_ROUNDS && resolution.status === 'unresolved'; round += 1) {
+    const missing = missingFoldReferences(snapshot, resolution.chain);
+    if (missing.length === 0) break;
+
+    const fetched = await readFoldsById(missing);
+    const before = known.length;
+    known = dedupeEventsById([...known, ...fetched.events]);
+    if (known.length === before) break;
+
+    resolution = resolveFarmInventory({ snapshot, folds: known, spends });
+  }
+
+  return resolution;
+}
 
 /**
  * Fetch what a snapshot needs and resolve its effective state.
  *
  * 1. read every candidate spend and, when the snapshot references a fold, every
  *    manifest for the inventory — one round trip normally covers the chain;
- * 2. resolve; on `missing-fold`, fetch the named ids from the configured relays
- *    and the relay hints the chain carries, and resolve again;
- * 3. stop when resolved, when nothing is missing, or when a round finds nothing
- *    new — an unresolved chain is reported, never guessed around.
+ * 2. resolve; on `missing-fold`, fetch the named ids and resolve again
+ *    (`resolveWithMissingFolds`).
  *
  * Spends are never filtered by timestamp. A spend older than the snapshot that
  * is not in its chain is pending, and the package applies it exactly once.
@@ -171,22 +206,7 @@ export async function loadFarmInventoryState(
   if (!spends.answered) return { status: 'error', error: 'No relay answered when reading spends against your inventory.' };
   if (!folds.answered) return { status: 'error', error: 'No relay answered when reading your inventory settlement records.' };
 
-  let known = dedupeEventsById(folds.events);
-  let resolution = resolveFarmInventory({ snapshot, folds: known, spends: spends.events });
-
-  for (let round = 0; round < MAX_FOLD_FETCH_ROUNDS && resolution.status === 'unresolved'; round += 1) {
-    const missing = missingFoldReferences(snapshot, resolution.chain);
-    if (missing.length === 0) break;
-
-    const fetched = await deps.readFoldsById(missing);
-    const before = known.length;
-    known = dedupeEventsById([...known, ...fetched.events]);
-    if (known.length === before) break;
-
-    resolution = resolveFarmInventory({ snapshot, folds: known, spends: spends.events });
-  }
-
-  return resolution;
+  return resolveWithMissingFolds(deps.readFoldsById, snapshot, folds.events, spends.events);
 }
 
 /** A one-line, user-readable account of why a chain did not resolve. */

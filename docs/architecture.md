@@ -67,10 +67,13 @@ Gameplay numbers were also moved *out* of the renderpack into
 
 The Farm owns one kind:31633 context per player, `farm:main`, and credits
 harvested produce there. Other games debit it with player-signed kind:1416
-spends; the Farm reads the effective balance (snapshot minus pending spends)
-and settles those spends in a kind:1417 manifest only when it is already
-replacing the snapshot. Protocol rules live in `@nostr-games/inventory`; the
-Farm's integration is described in [farm-inventory.md](./farm-inventory.md).
+spends; the Farm displays the effective balance (snapshot minus pending
+spends), keeps it current from a live relay subscription merged monotonically
+with an authoritative fetch, and settles those spends in a kind:1417 manifest
+only when it is already replacing the snapshot. Unresolved settlement history
+is shown as unavailable, never guessed. Protocol rules live in
+`@nostr-games/inventory`; the Farm's integration is described in
+[farm-inventory.md](./farm-inventory.md).
 
 ## What is deliberately absent
 

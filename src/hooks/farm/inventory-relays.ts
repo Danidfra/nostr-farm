@@ -139,6 +139,36 @@ export function readFarmFoldsById(nostr: NPool, signal?: AbortSignal) {
   };
 }
 
+/**
+ * The three filters that, together, are the whole `farm:main` ledger of one
+ * player: the snapshot, every spend against it, every manifest for it.
+ *
+ * Exactly the filters the authoritative reads use, scoped by author and by the
+ * FULL inventory address, with no `since` and nothing per item. They are what
+ * the live tail subscribes to, so a relay tells the Farm about every event
+ * that could change the effective balance and about nothing else.
+ */
+export function farmLedgerFilters(ownerPubkey: string): NostrFilter[] {
+  const address = farmInventoryAddress(ownerPubkey);
+  return [
+    buildGameInventoryFilter({ authors: [ownerPubkey], inventoryIds: [FARM_INVENTORY_D] }),
+    buildGameInventorySpendFilter({ authors: [ownerPubkey], inventoryAddresses: [address] }),
+    buildGameInventoryFoldFilter({ authors: [ownerPubkey], inventoryAddresses: [address] }),
+  ] as unknown as NostrFilter[];
+}
+
+/**
+ * One long-lived subscription on one relay carrying the whole ledger.
+ *
+ * `NRelay1.req` re-sends the `REQ` whenever its socket reconnects, so the same
+ * iterator keeps yielding across a dropped connection: the relay replays the
+ * stored events (a second `EOSE` marks the end of that replay) and then streams
+ * new ones. The iterator ends only on `CLOSED`, or throws when `signal` aborts.
+ */
+export function openFarmLedgerTail(nostr: NPool, ownerPubkey: string, relay: string, signal: AbortSignal) {
+  return nostr.relay(relay).req(farmLedgerFilters(ownerPubkey), { signal });
+}
+
 /** Everything the effective-inventory read model needs, wired to the relays. */
 export function farmInventoryReadDeps(nostr: NPool, ownerPubkey: string, signal?: AbortSignal): FarmInventoryReadDeps & {
   readInventory: () => Promise<InventoryReadResult>;

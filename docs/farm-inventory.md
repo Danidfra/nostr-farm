@@ -30,7 +30,7 @@ model is what makes that unnecessary.
 
 ## What the Farm reads
 
-`useFarmInventory` no longer shows the raw snapshot. It shows the **effective**
+`useFarmInventory` does not show the raw snapshot. It shows the **effective**
 inventory:
 
 ```
@@ -56,6 +56,51 @@ What is fetched, and from where:
 All three go to every relay in `INVENTORY_RELAYS` (the same cross-client set the
 Item Registry publishes to) and are deduplicated by event id. This is not a
 claim of global completeness; no relay set gives that.
+
+### Live: the ledger and its tail
+
+The displayed balance reacts to events other games publish while the Farm is
+open. The read side keeps a **ledger** (`src/inventory/ledger.ts`) for the
+player's `farm:main` — the canonical snapshot plus every valid spend and
+manifest seen, keyed by id — and derives the view from it with
+`resolveGameInventoryState`. `src/hooks/farm/inventory-live.ts` keeps it fed:
+
+```
+subscribe: one REQ per inventory relay, the same three filters as above
+    │  (events held until the fetch below has committed)
+authoritative fetch → commit (merge) → flush held events → live
+live EVENT → admit → re-derive → UI
+```
+
+- **Admission** is a gate, not a derivation: an event enters only if it is the
+  owner's own, well-formed per the package's parser, and scoped to the full
+  `31633:<player>:farm:main` address. Whether a spend is pending, folded,
+  voided or an overdraw is the package's decision at derivation time.
+- **Merging is monotonic.** Spends and manifests are unioned by id; the
+  snapshot only moves to a newer `created_at` (lowest id on a tie). A fetch
+  that returns after a live event is merged into the cache at TanStack Query's
+  commit (`structuralSharing`), so a stale response cannot erase a spend, a
+  manifest or a newer snapshot the tail already delivered.
+- **Settlement is continuous.** When the Farm folds a pending spend and
+  publishes the new snapshot, the manifest arrives, then the snapshot; the
+  chain then excludes the spend that the old view was subtracting. `4 − 2 = 2`
+  becomes a snapshot of `2` with nothing pending — never `0`. A snapshot whose
+  manifest has not arrived yet is *unresolved* (see below) until it does; the
+  live side fetches the missing manifest by id, with a bounded backoff.
+- **Recovery is event-driven, not polled.** A relay reconnect re-sends the
+  `REQ` and replays (Nostrify); the second `EOSE` triggers an authoritative
+  refetch. A `CLOSED` or failed subscription is reopened after a bounded
+  backoff, followed by a refetch. Coming back online refetches. There is no
+  interval and no `since` watermark: every read asks for the whole ledger and
+  the merge keeps what is newest.
+- **Nothing partial is shown.** Until the first authoritative fetch has
+  committed, live events are held rather than displayed: the snapshot without
+  its spends is not a balance.
+
+The harvest write path does not consume this cache. `creditHarvest` performs
+its own confirmed read inside the write lock, as before; after an accepted
+write the signed snapshot, its manifest and the spends it saw are merged into
+the ledger so the counter is right at once.
 
 ### The unresolved state
 
@@ -146,13 +191,13 @@ both exist, only the one the new snapshot references counts. Harmless.
 
 ## Cache behaviour
 
-There is one query (`farm-inventory`) holding the whole derived view, so a
-stale spend list cannot be subtracted from a fresh snapshot. After an accepted
-write the view is set directly from the signed snapshot **plus the manifests
-and spends the transaction saw, including the manifest it just published**, so
-a spend that snapshot folded is excluded by the chain rather than subtracted a
-second time. The query is then invalidated and refetched from the relays as
-before.
+There is one query (`farm-inventory`) holding the ledger and the view derived
+from it, so a stale spend list cannot be subtracted from a fresh snapshot.
+After an accepted write the signed snapshot **plus the manifests and spends
+the transaction saw, including the manifest it just published** are merged
+into that ledger, so a spend that snapshot folded is excluded by the chain
+rather than subtracted a second time. The query is then invalidated and
+refetched from the relays; the refetch merges, it does not replace.
 
 ## Revision, markers, and what did not change
 
@@ -177,10 +222,8 @@ is excluded once.
 
 ## Dependency
 
-The spend protocol is implemented in `@nostr-games/inventory` at commit
-`c3e777e`, which is not yet released to npm. Until it is, `package.json` links
-the sibling checkout (`file:../nostr-games-inventory`, built with `pnpm build`
-in that repository). Replace the link with the released version when it ships.
+The spend protocol is implemented in `@nostr-games/inventory` 0.5.0, which
+`package.json` takes from npm (`^0.5.0`).
 
 ## For a consuming game
 

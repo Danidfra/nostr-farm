@@ -93,22 +93,45 @@ export function produceQuantity(inventory: GameInventory | null, address: string
 }
 
 /**
- * Pick the newest valid `farm:main` inventory the owner authored.
+ * Parse one event as the owner's own `farm:main` snapshot, or `null`.
  *
  * Events from anybody else are ignored outright: this is the owner's own
  * inventory, and a stranger's event at the same `d` is a different inventory.
+ * This is the single admission rule for kind:31633 on the read side and the
+ * write side alike.
  */
+export function parseFarmSnapshot(event: NostrEvent, ownerPubkey: string): GameInventory | null {
+  if (event.pubkey !== ownerPubkey) return null;
+  if (event.kind !== KIND_GAME_INVENTORY) return null;
+
+  const parsed = parseGameInventoryResult(event, { mode: 'permissive' });
+  if (!parsed.ok || parsed.value.id !== FARM_INVENTORY_D) return null;
+  return parsed.value;
+}
+
+/**
+ * Which of two valid snapshots of the same inventory is the canonical one?
+ *
+ * Newer `created_at` wins — that is how relays resolve an addressable event,
+ * so it is what every other reader sees. On an exact tie the lower id wins,
+ * which is NIP-01's rule too. The Farm's own writes stamp every replacement
+ * strictly after its predecessor, so a tie only ever involves a foreign or
+ * duplicated event, and the answer must merely be deterministic.
+ */
+export function preferNewerInventory(current: GameInventory, incoming: GameInventory): GameInventory {
+  if (incoming.event.created_at > current.event.created_at) return incoming;
+  if (incoming.event.created_at === current.event.created_at && (incoming.event.id ?? '') < (current.event.id ?? '')) return incoming;
+  return current;
+}
+
+/** Pick the newest valid `farm:main` inventory the owner authored. */
 export function selectNewestInventory(events: readonly NostrEvent[], ownerPubkey: string): GameInventory | null {
   let newest: GameInventory | null = null;
 
   for (const event of events) {
-    if (event.pubkey !== ownerPubkey) continue;
-    if (event.kind !== KIND_GAME_INVENTORY) continue;
-
-    const parsed = parseGameInventoryResult(event, { mode: 'permissive' });
-    if (!parsed.ok || parsed.value.id !== FARM_INVENTORY_D) continue;
-
-    if (!newest || event.created_at > newest.event.created_at) newest = parsed.value;
+    const parsed = parseFarmSnapshot(event, ownerPubkey);
+    if (!parsed) continue;
+    newest = newest ? preferNewerInventory(newest, parsed) : parsed;
   }
 
   return newest;

@@ -1,31 +1,16 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { NostrEvent } from '@nostrify/nostrify';
 
 import { INVENTORY_KINDS } from '@/inventory/package';
 import { PRODUCE_CATALOG } from '@/inventory/produce-catalog';
-import { OWNER, eventId, foldEvent, snapshotEvent, spendEvent } from '@/test/inventory-fixtures';
+import { FakeRelayNetwork } from '@/test/fake-relay';
+import { OWNER, STRANGER, eventId, foldEvent, snapshotEvent, spendEvent } from '@/test/inventory-fixtures';
 
-const inventoryStore: NostrEvent[] = [];
-const foldStore: NostrEvent[] = [];
-const spendStore: NostrEvent[] = [];
-const queried: { kinds?: number[]; ids?: string[]; '#a'?: string[]; authors?: string[]; since?: number }[] = [];
+let network = new FakeRelayNetwork();
 
 vi.mock('@nostrify/react', () => ({
-  useNostr: () => ({
-    nostr: {
-      relay: () => ({
-        query: async ([filter]: (typeof queried)[number][]) => {
-          queried.push(filter);
-          const kind = filter.kinds?.[0];
-          const source =
-            kind === INVENTORY_KINDS.spend ? spendStore : kind === INVENTORY_KINDS.fold ? foldStore : inventoryStore;
-          return source.filter((event) => !filter.ids || filter.ids.includes(event.id));
-        },
-      }),
-    },
-  }),
+  useNostr: () => ({ nostr: network.pool }),
 }));
 
 const { useFarmInventory } = await import('./useFarmInventory');
@@ -38,18 +23,18 @@ function wrapper({ children }: { children: React.ReactNode }) {
 const S1 = eventId('s1');
 const M1 = eventId('m1');
 const CARROT = PRODUCE_CATALOG.carrot;
+const PUMPKIN = PRODUCE_CATALOG.pumpkin;
+
+const queriedFilters = () => network.queries.map((q) => q.filters[0]);
 
 beforeEach(() => {
-  inventoryStore.length = 0;
-  foldStore.length = 0;
-  spendStore.length = 0;
-  queried.length = 0;
+  network = new FakeRelayNetwork();
 });
 
 describe('useFarmInventory', () => {
   it('shows the effective quantity before the Farm has folded anything', async () => {
-    inventoryStore.push(snapshotEvent({ items: { [CARROT.address]: 3 } }));
-    spendStore.push(spendEvent({ id: S1, item: CARROT.address, quantity: 1 }));
+    network.seed(snapshotEvent({ items: { [CARROT.address]: 3 } }));
+    network.seed(spendEvent({ id: S1, item: CARROT.address, quantity: 1 }));
 
     const { result } = renderHook(() => useFarmInventory(OWNER), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -62,19 +47,19 @@ describe('useFarmInventory', () => {
   });
 
   it('queries spends by owner and full inventory address, never with a since', async () => {
-    inventoryStore.push(snapshotEvent({ items: { [CARROT.address]: 3 } }));
+    network.seed(snapshotEvent({ items: { [CARROT.address]: 3 } }));
     const { result } = renderHook(() => useFarmInventory(OWNER), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    const spendQuery = queried.find((filter) => filter.kinds?.[0] === INVENTORY_KINDS.spend);
+    const spendQuery = queriedFilters().find((filter) => filter.kinds?.[0] === INVENTORY_KINDS.spend);
     expect(spendQuery).toEqual({ kinds: [INVENTORY_KINDS.spend], authors: [OWNER], '#a': [`31633:${OWNER}:farm:main`] });
     expect(spendQuery?.since).toBeUndefined();
   });
 
   it('does not subtract a spend the snapshot already folded', async () => {
-    foldStore.push(foldEvent({ id: M1, spends: [S1] }));
-    spendStore.push(spendEvent({ id: S1, item: CARROT.address, quantity: 1 }));
-    inventoryStore.push(snapshotEvent({ items: { [CARROT.address]: 2 }, fold: { eventId: M1 } }));
+    network.seed(foldEvent({ id: M1, spends: [S1] }));
+    network.seed(spendEvent({ id: S1, item: CARROT.address, quantity: 1 }));
+    network.seed(snapshotEvent({ items: { [CARROT.address]: 2 }, fold: { eventId: M1 } }));
 
     const { result } = renderHook(() => useFarmInventory(OWNER), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -83,7 +68,7 @@ describe('useFarmInventory', () => {
   });
 
   it('reports unresolved, with no produce, when the referenced manifest cannot be found', async () => {
-    inventoryStore.push(snapshotEvent({ items: { [CARROT.address]: 3 }, fold: { eventId: M1, relay: 'wss://hint.example' } }));
+    network.seed(snapshotEvent({ items: { [CARROT.address]: 3 }, fold: { eventId: M1, relay: 'wss://hint.example' } }));
 
     const { result } = renderHook(() => useFarmInventory(OWNER), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -93,7 +78,7 @@ describe('useFarmInventory', () => {
     expect(result.current.data?.inventory).toBeNull();
     expect(result.current.data?.problems[0]).toMatch(/not among the supplied events/);
     // It did try the id on the relays before giving up.
-    expect(queried.some((filter) => filter.ids?.includes(M1))).toBe(true);
+    expect(queriedFilters().some((filter) => filter.ids?.includes(M1))).toBe(true);
   });
 
   it('is empty, and ready, when the player has no inventory', async () => {
@@ -101,6 +86,55 @@ describe('useFarmInventory', () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
     expect(result.current.data).toMatchObject({ status: 'ready', snapshot: null, inventory: null, produce: [] });
-    expect(queried.some((filter) => filter.kinds?.[0] === INVENTORY_KINDS.spend)).toBe(false);
+    expect(queriedFilters().some((filter) => filter.kinds?.[0] === INVENTORY_KINDS.spend)).toBe(false);
+  });
+
+  it('updates the rendered quantity when another game publishes a spend, without a refetch', async () => {
+    network.seed(snapshotEvent({ items: { [PUMPKIN.address]: 4 } }));
+    const { result } = renderHook(() => useFarmInventory(OWNER), { wrapper });
+    await waitFor(() => expect(result.current.data?.produce).toEqual([{ definition: PUMPKIN, quantity: 4 }]));
+    const queries = network.queries.length;
+
+    act(() => network.publish(spendEvent({ id: S1, item: PUMPKIN.address, quantity: 2, createdAt: 2_000 })));
+
+    await waitFor(() => expect(result.current.data?.produce).toEqual([{ definition: PUMPKIN, quantity: 2 }]));
+    expect(network.queries.length).toBe(queries);
+    expect(network.openSubscriptions).toBe(2);
+  });
+
+  it('keeps the balance continuous when the Farm folds the spend into a new snapshot', async () => {
+    network.seed(snapshotEvent({ createdAt: 1_000, items: { [PUMPKIN.address]: 4 } }));
+    network.seed(spendEvent({ id: S1, item: PUMPKIN.address, quantity: 2, createdAt: 2_000 }));
+    const { result } = renderHook(() => useFarmInventory(OWNER), { wrapper });
+    await waitFor(() => expect(result.current.data?.produce).toEqual([{ definition: PUMPKIN, quantity: 2 }]));
+
+    act(() => {
+      network.publish(foldEvent({ id: M1, spends: [S1], createdAt: 3_000 }));
+      network.publish(snapshotEvent({ id: eventId('snap2'), createdAt: 3_001, items: { [PUMPKIN.address]: 2 }, fold: { eventId: M1 } }));
+    });
+
+    await waitFor(() => expect(result.current.data?.pending).toEqual({ applied: 0, rejected: 0 }));
+    expect(result.current.data?.produce).toEqual([{ definition: PUMPKIN, quantity: 2 }]);
+  });
+
+  it('switches players cleanly: the previous player\'s subscriptions are closed and their state does not carry over', async () => {
+    network.seed(snapshotEvent({ items: { [PUMPKIN.address]: 4 } }));
+    const { result, rerender } = renderHook(({ owner }: { owner: string }) => useFarmInventory(owner), {
+      wrapper,
+      initialProps: { owner: OWNER },
+    });
+    await waitFor(() => expect(result.current.data?.produce).toEqual([{ definition: PUMPKIN, quantity: 4 }]));
+
+    rerender({ owner: STRANGER });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.produce).toEqual([]);
+    expect(result.current.data?.snapshot).toBeNull();
+    expect(network.openSubscriptions).toBe(2);
+    for (const sub of network.subscriptions.slice(-2)) for (const f of sub.filters) expect(f.authors).toEqual([STRANGER]);
+
+    // The old player's spend reaches nobody's view.
+    act(() => network.publish(spendEvent({ id: S1, item: PUMPKIN.address, quantity: 2, createdAt: 2_000 })));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(result.current.data?.produce).toEqual([]);
   });
 });
