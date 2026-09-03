@@ -9,7 +9,7 @@ src/
   farm/        pure domain      no React, no Nostr, no clock, no browser
   world/       definitions, pinned renderpacks, render geometry
   nostr/       event schemas for world / map / slot state
-  inventory/   boundary for a later inventory integration (no protocol yet)
+  inventory/   kind:31632 registry, farm:main kind:31633 credit, spend-aware reads
   hooks/       React glue: queries, mutations, clock
   components/  UI
   dev/         build-flag gated developer tools
@@ -63,8 +63,18 @@ afterwards. See [renderpacks.md](./renderpacks.md).
 Gameplay numbers were also moved *out* of the renderpack into
 `src/farm/crops/catalog.ts`, so artwork edits can never rebalance the game.
 
+## Inventory
+
+The Farm owns one kind:31633 context per player, `farm:main`, and credits
+harvested produce there. Other games debit it with player-signed kind:1416
+spends; the Farm reads the effective balance (snapshot minus pending spends)
+and settles those spends in a kind:1417 manifest only when it is already
+replacing the snapshot. Protocol rules live in `@nostr-games/inventory`; the
+Farm's integration is described in [farm-inventory.md](./farm-inventory.md).
+
 ## What is deliberately absent
 
-Shared farms, host election, command polling, visitor actions, inventory
-publishing, economy, animals, NPCs, crafting, quests and player movement. Each
-would add architecture that V1 cannot yet justify.
+Shared farms, host election, command polling, visitor actions, economy,
+animals, NPCs, crafting, quests and player movement. Each would add
+architecture that V1 cannot yet justify. The Farm never publishes a kind:1416
+spend and never writes another game's inventory.

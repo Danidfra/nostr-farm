@@ -1,6 +1,7 @@
 import { useCallback, useRef } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNostr } from '@nostrify/react';
+import type { NostrEvent } from '@nostrify/nostrify';
 
 import { CROP_CATALOG } from '@/farm/crops/catalog';
 import { applyFarmAction } from '@/farm/slots/transitions';
@@ -11,11 +12,11 @@ import { systemClock } from '@/farm/time';
 import { buildSlotState } from '@/nostr/slot-state';
 import { DEFAULT_GAME_RELAY } from '@/nostr/relays';
 import { creditHarvest, reconcileCredit, type CreditDeps, type CreditResult } from '@/inventory/credit-harvest';
-import { FARM_INVENTORY_D, selectNewestInventory } from '@/inventory/farm-inventory';
+import { FARM_INVENTORY_D } from '@/inventory/farm-inventory';
 import { getProduceForCrop, type ProduceDefinition } from '@/inventory/produce-catalog';
 import { withSerializedWrite } from '@/lib/write-lock';
 import { slotKey, type FarmSlotRecord, type FarmSlots } from './useFarmSlots';
-import { readFarmInventory, publishFarmInventory } from './inventory-relays';
+import { farmInventoryReadDeps, publishFarmInventory, INVENTORY_RELAY_HINT } from './inventory-relays';
 import { farmInventoryQueryKey, setFarmInventory } from './useFarmInventory';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
@@ -97,10 +98,11 @@ export function useFarmActions() {
     if (!user) throw new Error('Sign in to work your farm.');
     return {
       ownerPubkey: user.pubkey,
-      readInventory: readFarmInventory(nostr, user.pubkey),
+      ...farmInventoryReadDeps(nostr, user.pubkey),
       signEvent: (template) => user.signer.signEvent(template),
       publish: publishFarmInventory(nostr),
       nowSec: () => systemClock.now(),
+      relayHint: INVENTORY_RELAY_HINT,
     };
   }, [nostr, user]);
 
@@ -139,7 +141,10 @@ export function useFarmActions() {
 
       const credit = await runCredit(creditDeps(), record.sourceEventId, produce);
 
-      if (credit.status === 'rejected') throw new HarvestFailedError(credit.error, 'inventory', false);
+      if (credit.status === 'rejected' || credit.status === 'fold-unconfirmed') {
+        throw new HarvestFailedError(credit.error, 'inventory', false);
+      }
+      if (credit.status === 'unresolved') throw new HarvestFailedError(credit.error, 'inventory', false);
       if (credit.status === 'ambiguous') {
         throw new HarvestFailedError(
           'Your produce may or may not have been credited, so the crop was left in place. Try again — it will not be counted twice.',
@@ -149,9 +154,9 @@ export function useFarmActions() {
       }
 
       if (credit.status === 'accepted') {
-        // Show the new balance at once, parsed back from the very event we
-        // signed, rather than waiting for a relay to serve it back.
-        setFarmInventory(queryClient, user.pubkey, selectNewestInventory([credit.event], user.pubkey));
+        // Show the new balance at once, derived from the very event we signed
+        // and the spends it settled, rather than waiting for a relay.
+        setFarmInventory(queryClient, user.pubkey, { event: credit.event, folds: credit.folds, spends: credit.spends });
       }
 
       // Only now is it safe to remove the crop.
@@ -238,6 +243,15 @@ function guardKey(mapId: string, record: FarmSlotRecord): string {
 }
 
 /**
+ * kind:1417 manifests this tab signed whose settlement no snapshot has yet
+ * confirmed, per inventory. A manifest is immutable and identified by its id;
+ * if the retry needs the same manifest, it republishes this one instead of
+ * signing a look-alike with a different id. Cleared once a snapshot that
+ * references it is established, or once the retry needed a different one.
+ */
+const unconfirmedFolds = new Map<string, NostrEvent>();
+
+/**
  * Run the credit inside the shared write lock, then reconcile an ambiguous
  * outcome once before reporting it.
  */
@@ -246,18 +260,29 @@ async function runCredit(
   consumedEventId: string,
   produce: ProduceDefinition
 ): Promise<CreditResult> {
-  const request = { produce, consumedEventId, consumedEventRelay: DEFAULT_GAME_RELAY };
+  const lockKey = `nostr-worlds:inventory:${deps.ownerPubkey}:${FARM_INVENTORY_D}`;
 
-  return withSerializedWrite(`nostr-worlds:inventory:${deps.ownerPubkey}:${FARM_INVENTORY_D}`, async () => {
+  return withSerializedWrite(lockKey, async () => {
+    const request = { produce, consumedEventId, consumedEventRelay: DEFAULT_GAME_RELAY, unconfirmedFold: unconfirmedFolds.get(lockKey) };
     const result = await creditHarvest(deps, request);
+    rememberFold(lockKey, result);
     if (result.status !== 'ambiguous') return result;
 
     // "Unknown" is not failure. Look for the marker before telling the user
     // anything, and never publish a second `+1` to find out.
     const check = await reconcileCredit(deps, request);
     if (check.credited) {
+      unconfirmedFolds.delete(lockKey);
       return { status: 'already-applied', inventory: check.inventory!, quantity: check.quantity };
     }
     return result;
   });
+}
+
+function rememberFold(lockKey: string, result: CreditResult): void {
+  if (result.status === 'accepted' || result.status === 'already-applied') {
+    unconfirmedFolds.delete(lockKey);
+    return;
+  }
+  if ('fold' in result && result.fold) unconfirmedFolds.set(lockKey, result.fold);
 }

@@ -13,6 +13,8 @@ import {
   nextCreatedAt,
   produceQuantity,
   selectNewestInventory,
+  emptyFarmInventory,
+  farmInventoryAddress,
 } from './farm-inventory';
 
 const OWNER = 'a'.repeat(64);
@@ -241,5 +243,80 @@ describe('created_at', () => {
 
   it('uses the clock when there is no previous event', () => {
     expect(nextCreatedAt(null, 1_700_000_500)).toBe(1_700_000_500);
+  });
+});
+
+describe('fold reference', () => {
+  const base = parse(
+    signed({
+      kind: KIND_GAME_INVENTORY,
+      content: '',
+      tags: [
+        ['d', FARM_INVENTORY_D],
+        ['revision', '3'],
+        ['a', PUMPKIN.address, PUMPKIN.relayHint, '2'],
+        ['e', 'aa'.repeat(32), 'wss://relay.primal.net', 'fold'],
+        ['e', PLANT_EVENT, GAME_RELAY, FARM_HARVEST_MARKER],
+      ],
+    })
+  );
+
+  it('keeps the base fold reference when nothing new was settled', () => {
+    const next = signed(buildCreditEvent({ base, produce: CARROT, consumedEventId: 'd'.repeat(64), consumedEventRelay: GAME_RELAY }));
+    expect(next.tags.filter((tag) => tag[0] === 'e' && tag[3] === 'fold')).toEqual([
+      ['e', 'aa'.repeat(32), 'wss://relay.primal.net', 'fold'],
+    ]);
+    expect(parse(next).fold).toEqual({ eventId: 'aa'.repeat(32), relay: 'wss://relay.primal.net' });
+  });
+
+  it('replaces it with the new manifest when one was published, keeping exactly one', () => {
+    const next = signed(
+      buildCreditEvent({
+        base,
+        produce: CARROT,
+        consumedEventId: 'd'.repeat(64),
+        consumedEventRelay: GAME_RELAY,
+        fold: { eventId: 'bb'.repeat(32), relay: 'wss://relay.ditto.pub' },
+      })
+    );
+    expect(next.tags.filter((tag) => tag[0] === 'e' && tag[3] === 'fold')).toEqual([
+      ['e', 'bb'.repeat(32), 'wss://relay.ditto.pub', 'fold'],
+    ]);
+    // The harvest marker and the revision survive alongside it.
+    expect(harvestedEventIds(parse(next))).toEqual([PLANT_EVENT, 'd'.repeat(64)]);
+    expect(parse(next).revision).toBe(4);
+  });
+
+  it('a first inventory can reference a manifest too', () => {
+    const next = parse(
+      signed(
+        buildCreditEvent({
+          base: null,
+          produce: CARROT,
+          consumedEventId: PLANT_EVENT,
+          consumedEventRelay: GAME_RELAY,
+          fold: { eventId: 'bb'.repeat(32), relay: '' },
+        })
+      )
+    );
+    expect(next.fold).toEqual({ eventId: 'bb'.repeat(32), relay: '' });
+    expect(next.revision).toBe(1);
+  });
+});
+
+describe('the empty base', () => {
+  it('is the owner\'s farm:main with nothing in it', () => {
+    const empty = emptyFarmInventory(OWNER);
+    expect(empty.address).toBe(farmInventoryAddress(OWNER));
+    expect(empty.owner).toBe(OWNER);
+    expect(empty.items).toEqual([]);
+    expect(empty.contexts).toEqual([FARM_GAME_CONTEXT]);
+    expect(empty.fold).toBeUndefined();
+    expect(empty.revision).toBeUndefined();
+    expect(harvestedEventIds(empty)).toEqual([]);
+  });
+
+  it('names the inventory by the full address, never by d alone', () => {
+    expect(farmInventoryAddress(OWNER)).toBe(`31633:${OWNER}:farm:main`);
   });
 });

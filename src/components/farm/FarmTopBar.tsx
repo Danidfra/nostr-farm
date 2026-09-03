@@ -14,9 +14,14 @@ interface FarmTopBarProps {
   renderpack?: RenderpackRef;
   /** Official Farm produce currently held, for the compact counter. */
   produce?: { definition: { name: string; emoji: string }; quantity: number }[];
+  /**
+   * `unresolved` means the inventory's settlement records could not be
+   * verified, so there is no balance to show — not even the raw snapshot.
+   */
+  produceStatus?: 'ready' | 'unresolved';
 }
 
-export function FarmTopBar({ farmName, renderpack, produce }: FarmTopBarProps) {
+export function FarmTopBar({ farmName, renderpack, produce, produceStatus }: FarmTopBarProps) {
   const { user, metadata } = useCurrentUser();
   const { logout } = useLoginActions();
 
@@ -35,7 +40,16 @@ export function FarmTopBar({ farmName, renderpack, produce }: FarmTopBarProps) {
       </div>
 
       <div className="flex items-center gap-3">
-        {produce && produce.length > 0 && (
+        {produceStatus === 'unresolved' && (
+          <span
+            className="rounded-full bg-amber-200/70 px-3 py-1 text-xs text-amber-950 dark:bg-amber-900/50 dark:text-amber-100"
+            title="Your inventory's settlement records could not be verified, so the balance cannot be shown yet."
+          >
+            Produce unavailable
+          </span>
+        )}
+
+        {produceStatus !== 'unresolved' && produce && produce.length > 0 && (
           <div className="flex items-center gap-2 rounded-full bg-white/40 px-3 py-1 text-sm dark:bg-black/30">
             {produce.map(({ definition, quantity }) => (
               <span key={definition.name} title={`${quantity} ${definition.name}`} className="tabular-nums">

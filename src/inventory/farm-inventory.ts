@@ -3,6 +3,7 @@ import type { NostrEvent } from '@nostrify/nostrify';
 import {
   KIND_GAME_INVENTORY,
   addInventoryItemQuantity,
+  buildGameInventoryAddress,
   buildGameInventoryEvent,
   getInventoryItemQuantity,
   parseGameInventoryResult,
@@ -13,6 +14,7 @@ import {
 import { FARM_GAME_CONTEXT } from './constants';
 import { FARM_INVENTORY_CONTEXT } from './package';
 import type { ProduceDefinition } from './produce-catalog';
+import type { EventReference } from './relay-io';
 
 /**
  * The pure half of the Farm's kind:31633 inventory: markers, base selection and
@@ -33,6 +35,38 @@ export const FARM_HARVEST_MARKER = 'farm-harvest';
 
 /** The inventory context the Farm writes. It writes no other. */
 export const FARM_INVENTORY_D = FARM_INVENTORY_CONTEXT;
+
+/**
+ * The full `31633:<owner>:farm:main` address.
+ *
+ * Every spend and every fold manifest names the inventory by this full
+ * coordinate. `farm:main` on its own is not an identity — it is the same `d`
+ * for every player.
+ */
+export function farmInventoryAddress(ownerPubkey: string): string {
+  return buildGameInventoryAddress(ownerPubkey, FARM_INVENTORY_D);
+}
+
+/**
+ * The inventory a player who has none yet is treated as holding: nothing.
+ *
+ * Used only as the BASE a derivation runs against when the confirmed read found
+ * no snapshot. It is never published as-is, and it has no bearing on whether a
+ * write is allowed to create a first inventory — `credit-harvest.ts` still
+ * insists on a confirmed empty read for that. Its purpose is to let the spend
+ * derivation run through the same code path: a spend against an inventory that
+ * holds nothing is an overdraw, and an overdraw is voided rather than left to
+ * apply against whatever the first harvest adds.
+ */
+export function emptyFarmInventory(ownerPubkey: string): GameInventory {
+  const template = buildGameInventoryEvent({ id: FARM_INVENTORY_D, contexts: [FARM_GAME_CONTEXT], items: [] });
+  const parsed = parseGameInventoryResult(
+    { ...template, id: '', pubkey: ownerPubkey, created_at: 0, sig: '' },
+    { mode: 'permissive' }
+  );
+  if (!parsed.ok) throw new Error(`Could not build the empty farm inventory: ${parsed.error}`);
+  return parsed.value;
+}
 
 /** Every consumed plant event id already credited in this inventory. */
 export function harvestedEventIds(inventory: GameInventory | null): string[] {
@@ -81,13 +115,28 @@ export function selectNewestInventory(events: readonly NostrEvent[], ownerPubkey
 }
 
 export interface CreditInput {
-  /** The current inventory, or `null` when the player provably has none yet. */
+  /**
+   * The inventory to credit ON TOP OF, or `null` when the player provably has
+   * none yet.
+   *
+   * In the spend-aware write path this is the EFFECTIVE inventory — the
+   * snapshot minus every applied pending spend — not the raw snapshot. Its
+   * `event` is still the snapshot's, which is what keeps the round-trip
+   * lossless: unmanaged tags, the harvest markers and the current fold
+   * reference all come from there.
+   */
   base: GameInventory | null;
   produce: ProduceDefinition;
   /** The kind:31417 plant event this harvest consumes. */
   consumedEventId: string;
   /** Relay hint for the consumed event, so the marker is resolvable. */
   consumedEventRelay: string;
+  /**
+   * The kind:1417 manifest this snapshot newly settles spends through. Omit it
+   * when nothing was settled: the base's own fold reference then round-trips
+   * unchanged, which is what keeps already-folded spends folded.
+   */
+  fold?: EventReference;
 }
 
 /**
@@ -106,8 +155,10 @@ export interface CreditInput {
  *   applications wrote — including our own earlier harvest markers.
  */
 export function buildCreditEvent(input: CreditInput): UnsignedEventTemplate<typeof KIND_GAME_INVENTORY> {
-  const { base, produce, consumedEventId, consumedEventRelay } = input;
+  const { base, produce, consumedEventId, consumedEventRelay, fold } = input;
   const marker: string[] = ['e', consumedEventId, consumedEventRelay, FARM_HARVEST_MARKER];
+  // A new manifest replaces the reference; no new manifest keeps the base's.
+  const foldInput = fold ? { fold: { eventId: fold.eventId, relay: fold.relay } } : {};
 
   if (!base) {
     return buildGameInventoryEvent({
@@ -115,6 +166,7 @@ export function buildCreditEvent(input: CreditInput): UnsignedEventTemplate<type
       contexts: [FARM_GAME_CONTEXT],
       items: [{ address: produce.address, relay: produce.relayHint, quantity: 1 }],
       revision: 1,
+      ...foldInput,
       extraTags: [marker],
     });
   }
@@ -123,6 +175,7 @@ export function buildCreditEvent(input: CreditInput): UnsignedEventTemplate<type
 
   return buildGameInventoryEvent({
     ...toBuildGameInventoryInput(next),
+    ...foldInput,
     revision: (next.revision ?? 0) + 1,
     extraTags: [marker],
   });

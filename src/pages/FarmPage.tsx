@@ -64,6 +64,7 @@ export default function FarmPage() {
         farmName={farm.data?.world.name}
         renderpack={farm.data?.world.renderpack}
         produce={inventory.data?.produce}
+        produceStatus={inventory.data?.status}
       />
 
       <main className="relative flex-1 overflow-hidden">

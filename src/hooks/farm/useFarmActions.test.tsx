@@ -7,8 +7,9 @@ import { plantSeed, waterPlant } from '@/farm/growth/evaluate';
 import { CROP_CATALOG } from '@/farm/crops/catalog';
 import { systemClock } from '@/farm/time';
 import type { FarmSlot } from '@/farm/slots/types';
-import { KIND_GAME_INVENTORY } from '@/inventory/package';
+import { INVENTORY_KINDS, KIND_GAME_INVENTORY } from '@/inventory/package';
 import { PRODUCE_CATALOG } from '@/inventory/produce-catalog';
+import { eventId, foldEvent, foldRefs, foldTag, snapshotEvent, spendEvent } from '@/test/inventory-fixtures';
 
 const OWNER = 'a'.repeat(64);
 const MAP = 'farm.field';
@@ -18,6 +19,18 @@ const PLANT_EVENT = 'c'.repeat(64);
 const slotPublishes: { kind?: number; tags?: string[][] }[] = [];
 /** Events published through the INVENTORY path (kind 31633). */
 const inventoryStore: NostrEvent[] = [];
+/** kind:1417 manifests on the relays. */
+const foldStore: NostrEvent[] = [];
+/** kind:1416 spends on the relays (published by another game, never by the Farm). */
+const spendStore: NostrEvent[] = [];
+/** Every distinct event offered to the inventory relays, in order, by kind. */
+const inventoryPublishes: number[] = [];
+const offered = new Set<string>();
+function recordPublish(event: NostrEvent) {
+  if (offered.has(event.id)) return;
+  offered.add(event.id);
+  inventoryPublishes.push(event.kind);
+}
 
 let slotPublishFails = false;
 let inventoryPublishOutcome: 'accepted' | 'rejected' | 'ambiguous' = 'accepted';
@@ -30,7 +43,7 @@ vi.mock('@/hooks/useCurrentUser', () => ({
       signer: {
         signEvent: async (t: { kind: number; content: string; tags: string[][]; created_at: number }) => ({
           ...t,
-          id: `inv${inventoryStore.length}`.padEnd(64, '0'),
+          id: `${t.kind}-${offered.size}`.padEnd(64, '0'),
           pubkey: OWNER,
           sig: 'x'.repeat(128),
         }),
@@ -53,8 +66,21 @@ vi.mock('@nostrify/react', () => ({
   useNostr: () => ({
     nostr: {
       relay: () => ({
-        query: async () => [...inventoryStore],
+        query: async ([filter]: { kinds?: number[]; ids?: string[] }[]) => {
+          const kind = filter.kinds?.[0];
+          const source =
+            kind === INVENTORY_KINDS.spend ? spendStore : kind === INVENTORY_KINDS.fold ? foldStore : inventoryStore;
+          return source.filter((event) => !filter.ids || filter.ids.includes(event.id));
+        },
         event: async (event: NostrEvent) => {
+          // Manifests are published to the same relays through the same path;
+          // in this fake they always land, so the snapshot's outcome is what
+          // the scenario controls.
+          recordPublish(event);
+          if (event.kind === INVENTORY_KINDS.fold) {
+            if (!foldStore.some((existing) => existing.id === event.id)) foldStore.push(event);
+            return;
+          }
           // Three relays receive the same event; the fake store keeps one copy,
           // the way a reader that de-duplicates by id would see it.
           const store = (e: NostrEvent) => {
@@ -80,6 +106,8 @@ vi.mock('@/hooks/useToast', () => ({
 }));
 
 const { useFarmActions } = await import('./useFarmActions');
+const { farmInventoryQueryKey } = await import('./useFarmInventory');
+type FarmInventoryView = import('./useFarmInventory').FarmInventoryView;
 
 function readyCarrot(): FarmSlot {
   const crop = CROP_CATALOG.carrot;
@@ -91,8 +119,9 @@ function readyCarrot(): FarmSlot {
   return { coord: { x: 1, y: 1 }, content: { type: 'plant', plant } };
 }
 
+let client: QueryClient;
+
 function wrapper({ children }: { children: React.ReactNode }) {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 }
 
@@ -110,8 +139,13 @@ const harvestMarkers = () => inventoryTags().filter((t) => t[0] === 'e' && t[3] 
 
 beforeEach(() => {
   vi.stubGlobal('navigator', {});
+  client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   slotPublishes.length = 0;
   inventoryStore.length = 0;
+  foldStore.length = 0;
+  spendStore.length = 0;
+  inventoryPublishes.length = 0;
+  offered.clear();
   toasts.length = 0;
   slotPublishFails = false;
   inventoryPublishOutcome = 'accepted';
@@ -285,5 +319,88 @@ describe('non-harvest actions still work', () => {
     expect(slotPublishes).toHaveLength(1);
     expect(inventoryStore).toHaveLength(0);
     await waitFor(() => expect(toasts.some((t) => t.title?.startsWith('+1'))).toBe(false));
+  });
+});
+
+describe('harvest with spends from another game', () => {
+  const S1 = eventId('s1');
+  const M1 = eventId('m1');
+
+  it('folds a pending spend: manifest first, then a snapshot that references it', async () => {
+    inventoryStore.push(snapshotEvent({ items: { [PRODUCE_CATALOG.carrot.address]: 3 }, revision: 1 }));
+    spendStore.push(spendEvent({ id: S1, item: PRODUCE_CATALOG.carrot.address, quantity: 1 }));
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    await result.current.act({ mapId: MAP, record: record(readyCarrot()), type: 'harvest' });
+
+    expect(inventoryPublishes).toEqual([INVENTORY_KINDS.fold, KIND_GAME_INVENTORY]);
+    expect(foldStore).toHaveLength(1);
+    expect(foldRefs(foldStore[0], 'spend')).toEqual([S1]);
+    // (3 − 1) + 1
+    expect(carrotQuantity()).toBe(3);
+    expect(foldTag(inventoryStore.at(-1))?.[1]).toBe(foldStore[0].id);
+    expect(harvestMarkers()).toEqual([PLANT_EVENT]);
+    expect(slotPublishes).toHaveLength(1);
+  });
+
+  it('the cached view after the write shows the folded balance, not the balance minus the spend again', async () => {
+    inventoryStore.push(snapshotEvent({ items: { [PRODUCE_CATALOG.carrot.address]: 3 }, revision: 1 }));
+    spendStore.push(spendEvent({ id: S1, item: PRODUCE_CATALOG.carrot.address, quantity: 1 }));
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    await result.current.act({ mapId: MAP, record: record(readyCarrot()), type: 'harvest' });
+
+    const view = client.getQueryData<FarmInventoryView>(farmInventoryQueryKey(OWNER));
+    expect(view?.status).toBe('ready');
+    expect(view?.produce).toEqual([{ definition: PRODUCE_CATALOG.carrot, quantity: 3 }]);
+    expect(view?.pending).toEqual({ applied: 0, rejected: 0 });
+  });
+
+  it('blocks the harvest, and clears nothing, while the fold chain is unresolved', async () => {
+    inventoryStore.push(snapshotEvent({ items: { [PRODUCE_CATALOG.carrot.address]: 3 }, fold: { eventId: M1 } }));
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    await expect(
+      result.current.act({ mapId: MAP, record: record(readyCarrot()), type: 'harvest' })
+    ).rejects.toThrow(/could not be verified/i);
+
+    expect(inventoryPublishes).toEqual([]);
+    expect(slotPublishes).toHaveLength(0);
+    expect(inventoryStore).toHaveLength(1);
+  });
+
+  it('harvests normally, with no manifest, when the chain resolves and nothing is pending', async () => {
+    foldStore.push(foldEvent({ id: M1, spends: [S1] }));
+    spendStore.push(spendEvent({ id: S1, item: PRODUCE_CATALOG.carrot.address, quantity: 1 }));
+    inventoryStore.push(snapshotEvent({ items: { [PRODUCE_CATALOG.carrot.address]: 2 }, fold: { eventId: M1 }, revision: 3 }));
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    await result.current.act({ mapId: MAP, record: record(readyCarrot()), type: 'harvest' });
+
+    expect(inventoryPublishes).toEqual([KIND_GAME_INVENTORY]);
+    expect(foldStore).toHaveLength(1);
+    expect(foldTag(inventoryStore.at(-1))?.[1]).toBe(M1);
+    expect(carrotQuantity()).toBe(3);
+  });
+
+  it('the snapshot after an accepted manifest failing leaves the orphan and reuses it on retry', async () => {
+    inventoryStore.push(snapshotEvent({ items: { [PRODUCE_CATALOG.carrot.address]: 3 }, revision: 1 }));
+    spendStore.push(spendEvent({ id: S1, item: PRODUCE_CATALOG.carrot.address, quantity: 1 }));
+    inventoryPublishOutcome = 'rejected';
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+    const slot = readyCarrot();
+
+    await expect(result.current.act({ mapId: MAP, record: record(slot), type: 'harvest' })).rejects.toThrow();
+    expect(foldStore).toHaveLength(1);
+    expect(inventoryStore).toHaveLength(1);
+
+    inventoryPublishOutcome = 'accepted';
+    await result.current.act({ mapId: MAP, record: record(slot), type: 'harvest' });
+
+    // Same manifest, referenced now; one credit, one marker.
+    expect(foldStore).toHaveLength(1);
+    expect(foldTag(inventoryStore.at(-1))?.[1]).toBe(foldStore[0].id);
+    expect(carrotQuantity()).toBe(3);
+    expect(harvestMarkers()).toEqual([PLANT_EVENT]);
   });
 });

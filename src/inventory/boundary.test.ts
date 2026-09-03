@@ -67,7 +67,7 @@ describe('inventory boundary', () => {
   });
 
   it('records the protocol kinds', () => {
-    expect(INVENTORY_KINDS).toEqual({ itemDefinition: 31632, inventory: 31633, placement: 31634 });
+    expect(INVENTORY_KINDS).toEqual({ itemDefinition: 31632, inventory: 31633, placement: 31634, spend: 1416, fold: 1417 });
   });
 
   it('reports the protocol package as installed now that the registry uses it', () => {

@@ -30,7 +30,7 @@ Sign in with a NIP-07 extension, a bunker URI or an nsec, then create your farm.
 src/farm/        pure domain — no React, no Nostr, no clock, no browser
 src/world/       map definitions, pinned renderpacks, render geometry
 src/nostr/       world / map / slot event schemas
-src/inventory/   kind:31632 item registry + boundary for later inventory work
+src/inventory/   kind:31632 item registry, farm:main kind:31633 credit + spend-aware reads
 src/hooks/       React glue
 src/components/  UI
 src/dev/         build-flag gated developer tools (/dev, /dev/worlds)
@@ -52,4 +52,4 @@ docs/            architecture and protocol notes
 
 V1 is a personal-farm vertical slice: enter farm → see the field → plant →
 water → watch it grow → harvest. Harvesting yields a domain result and stops
-there; inventory, economy, multiplayer and visitor actions are future work.
+there; harvested produce is credited to the player's `farm:main` inventory (see `docs/farm-inventory.md`); economy, multiplayer and visitor actions are future work.

@@ -36,6 +36,7 @@ test to relax.
 | a relay query or mutation | `src/hooks/farm/` |
 | a developer-only tool | `src/dev/` (gated, see `docs/dev-tools.md`) |
 | kind:31632 item logic | `src/inventory/registry/`, see `docs/item-registry.md` |
+| farm:main inventory, spends, folds | `src/inventory/`, see `docs/farm-inventory.md` |
 
 Gameplay decisions belong in `src/farm` and nowhere else. Hooks and components
 move values around; they do not re-derive rules.
@@ -79,6 +80,7 @@ Run it before claiming anything works. `npm run build` must not emit a
 ## Out of scope right now
 
 Shared farms, host election, command polling, visitor actions (kind 1415 is a
-recorded candidate only), kind:31633 inventory publishing, economy,
-animals, NPCs, shops, crafting, quests, progression, tilesets and player
-movement.
+recorded candidate only), economy, animals, NPCs, shops, crafting, quests,
+progression, tilesets and player movement. The Farm publishes kind:31633 and
+kind:1417 for `farm:main` only; it never publishes a kind:1416 spend, never
+writes another game's inventory, and has no UI for spending items.

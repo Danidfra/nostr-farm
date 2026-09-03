@@ -54,6 +54,25 @@ export {
   getInventoryItems,
   compareGameInventoryRevisions,
   INVENTORY_REVISION_TAG,
+
+  // kind:1416 spends and kind:1417 fold manifests. The Farm READS spends and
+  // WRITES manifests; it never publishes a spend of its own. Every rule —
+  // author == owner, (created_at, id) ordering, overdraw rejection, fold-chain
+  // settlement — is the package's, and the Farm only orchestrates fetching.
+  KIND_GAME_INVENTORY_SPEND,
+  KIND_GAME_INVENTORY_FOLD,
+  parseGameInventorySpend,
+  parseGameInventorySpendResult,
+  parseGameInventoryFold,
+  parseGameInventoryFoldResult,
+  buildGameInventorySpendFilter,
+  buildGameInventoryFoldFilter,
+  buildGameInventoryFoldEvent,
+  compareGameInventorySpendOrder,
+  deriveGameInventoryState,
+  resolveGameInventoryFoldChain,
+  resolveGameInventoryState,
+  toBuildGameInventoryFoldInput,
 } from '@nostr-games/inventory';
 
 export type {
@@ -80,16 +99,32 @@ export type {
   GameInventoryRevisionStatus,
   GameInventoryRevisionCandidate,
   InventoryValidationResult,
+  GameInventoryFoldReference,
+
+  GameInventorySpend,
+  GameInventorySpendApplication,
+  GameInventoryDerivedState,
+  GameInventorySpendFilter,
+  GameInventoryFold,
+  GameInventoryFoldFilter,
+  GameInventoryFoldProblem,
+  GameInventoryFoldResolution,
+  GameInventoryStateResolution,
+  BuildGameInventoryFoldInput,
 } from '@nostr-games/inventory';
 
 /** Kinds defined by the inventory protocol. */
 export const INVENTORY_KINDS = {
   /** Item definition (addressable). Implemented by the Item Registry. */
   itemDefinition: 31632,
-  /** Per-context inventory (addressable). Not implemented yet. */
+  /** Per-context inventory (addressable). The Farm writes `farm:main`. */
   inventory: 31633,
   /** Placement / equipment / decoration (addressable). Not implemented yet. */
   placement: 31634,
+  /** Owner-signed debit against an inventory (regular). The Farm reads these. */
+  spend: 1416,
+  /** Record of which spends a snapshot settled (regular). The Farm writes these. */
+  fold: 1417,
 } as const;
 
 /**
@@ -107,6 +142,6 @@ export function inventoryPackageStatus(): InventoryPackageStatus {
   return {
     installed: true,
     reason:
-      '@nostr-games/inventory provides kind:31632 for the Item Registry and kind:31633 for the farm:main produce inventory.',
+      '@nostr-games/inventory provides kind:31632 for the Item Registry, kind:31633 for the farm:main produce inventory, and kind:1416/1417 for cross-game spends against it.',
   };
 }
