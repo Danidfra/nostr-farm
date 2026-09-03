@@ -36,7 +36,6 @@ export const FARM_OFFICIAL_ISSUER_PUBKEY =
 export const ITEM_REGISTRY_RELAYS: readonly string[] = Object.freeze([
   'wss://relay.primal.net',
   'wss://relay.ditto.pub',
-  'wss://relay.damus.io',
 ]);
 
 /** The `d` namespace official Farm items use: `farm:<category>:<slug>`. */
