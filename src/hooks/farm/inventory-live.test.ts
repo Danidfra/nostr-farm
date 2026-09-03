@@ -7,7 +7,7 @@ import { PRODUCE_CATALOG } from '@/inventory/produce-catalog';
 import { FakeRelayNetwork } from '@/test/fake-relay';
 import { OWNER, OTHER_GAME_ADDRESS, STRANGER, eventId, foldEvent, snapshotEvent, spendEvent } from '@/test/inventory-fixtures';
 
-import { missingFoldRetryDelayMs, startFarmInventoryLive, tailRestartDelayMs, type FarmInventoryLive } from './inventory-live';
+import { fetchRetryDelayMs, missingFoldRetryDelayMs, startFarmInventoryLive, tailRestartDelayMs, type FarmInventoryLive } from './inventory-live';
 import { farmInventoryQueryKey, type FarmInventoryView } from './useFarmInventory';
 
 const RELAYS = ['wss://one.example', 'wss://two.example'] as const;
@@ -277,6 +277,72 @@ describe('farm inventory live tail', () => {
     onlineManager.setOnline(true);
 
     await vi.waitFor(() => expect(pumpkins()).toBe(2));
+  });
+
+  it('F: a failing authoritative read is retried past any fixed budget while the tails stay open, and recovers on its own', async () => {
+    vi.useFakeTimers();
+    network.seed(S1());
+    network.failQueries = new Error('query path down');
+    start();
+    await until(() => network.openSubscriptions === RELAYS.length);
+    await flush();
+    // Bootstrap attempt failed: nothing is shown, the tails are open and healthy.
+    expect(view()).toBeUndefined();
+    expect(network.subscriptions).toHaveLength(RELAYS.length);
+    const inventoryReads = () => network.queries.filter((q) => q.filters[0].kinds?.[0] === INVENTORY_KINDS.inventory);
+    expect(inventoryReads().length).toBeGreaterThan(0);
+
+    // Nine consecutive failures — beyond the six the old code gave up after.
+    for (let failure = 1; failure <= 9; failure += 1) {
+      const before = network.queries.length;
+      await vi.advanceTimersByTimeAsync(fetchRetryDelayMs(failure) - 1);
+      expect(network.queries.length).toBe(before); // nothing before the deadline
+      await vi.advanceTimersByTimeAsync(1);
+      await flush();
+      // Exactly one attempt at the deadline: the snapshot filter, once per relay, and nothing overlapping.
+      const round = network.queries.slice(before);
+      expect(round.length).toBeGreaterThan(0);
+      expect(new Set(round.map((q) => q.relay)).size).toBe(round.length);
+      for (const query of round) expect(query.filters[0].kinds).toEqual([INVENTORY_KINDS.inventory]);
+      expect(view()).toBeUndefined();
+    }
+    expect(fetchRetryDelayMs(9)).toBe(5 * 60_000); // capped by now
+
+    // No reconnect, no online transition, no event: the subscriptions never
+    // closed, and the query path simply comes back.
+    expect(network.subscriptions).toHaveLength(RELAYS.length);
+    expect(network.openSubscriptions).toBe(RELAYS.length);
+    network.failQueries = null;
+    await vi.advanceTimersByTimeAsync(fetchRetryDelayMs(10));
+    await flush();
+    expect(view()?.status).toBe('ready');
+    expect(pumpkins()).toBe(4);
+
+    // Success leaves no timer: nothing is fetched afterwards.
+    const settled = network.queries.length;
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(network.queries.length).toBe(settled);
+
+    // And the tail is live on the view it established.
+    network.publish(spendEvent({ id: A, item: PUMPKIN.address, quantity: 2, createdAt: 2_000 }));
+    await flush();
+    expect(pumpkins()).toBe(2);
+  });
+
+  it('F: stopping cancels an outstanding failed-fetch retry', async () => {
+    vi.useFakeTimers();
+    network.seed(S1());
+    network.failQueries = new Error('query path down');
+    const controller = start();
+    await until(() => network.openSubscriptions === RELAYS.length);
+    await flush();
+
+    controller.stop();
+    network.failQueries = null;
+    const after = network.queries.length;
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(network.queries.length).toBe(after);
+    expect(view()).toBeUndefined();
   });
 
   it('G: malformed, wrong-author and wrong-inventory ledger events change nothing', async () => {

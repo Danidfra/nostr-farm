@@ -69,12 +69,11 @@ export const MAX_TAIL_RESTART_MS = 2 * 60_000;
 /** A subscription that lived this long before ending resets that relay's restart backoff. */
 const STABLE_TAIL_MS = 60_000;
 
-/** Delay before retrying a failed authoritative fetch: 2s, 4s, … capped. */
-export function retryDelayMs(attempt: number): number {
-  return Math.min(60_000, 1000 * 2 ** Math.min(attempt, 6));
+/** Delay before the n-th (1-based) consecutive retry of a failed authoritative fetch: 2s, 4s, … capped. */
+export function fetchRetryDelayMs(failure: number): number {
+  return Math.min(MAX_FETCH_RETRY_MS, 2000 * 2 ** Math.max(0, failure - 1));
 }
-/** Failed authoritative fetches before leaving recovery to the tails (reconnect replay) and `online`. */
-export const MAX_FETCH_ATTEMPTS = 6;
+export const MAX_FETCH_RETRY_MS = 5 * 60_000;
 
 /**
  * The gate between "a live controller has its subscriptions open" and "the
@@ -155,7 +154,7 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
 
   let fetching: Promise<void> | null = null;
   let refetchRequested = false;
-  let fetchAttempts = 0;
+  let fetchFailures = 0;
   let fetchRetry: ReturnType<typeof setTimeout> | undefined;
 
   let missingHead = '';
@@ -181,21 +180,32 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
     if (admitFarmInventoryEvents(queryClient, ownerPubkey, [event])) settleMissingFolds();
   }
 
-  /** Run the authoritative read and merge it. Deduplicated while in flight. */
+  /**
+   * Run the authoritative read and merge it.
+   *
+   * Never overlapping: a call while a fetch is in flight only notes that
+   * another is wanted, and that one starts when the current one has settled
+   * successfully. A failed fetch arms ONE timer for the next attempt, at a
+   * delay that doubles up to a cap, for as long as this controller lives —
+   * the live tails staying healthy is no evidence that the query path is,
+   * and the bootstrap view cannot be established without this read. A request
+   * that arrives during a failing fetch is covered by that retry. An explicit
+   * trigger (reconnect replay, online) cancels a pending timer and fetches at
+   * once. Success clears the backoff and leaves no timer behind.
+   */
   function ensureFetched(): void {
     if (stopped) return;
     if (fetching) {
       refetchRequested = true;
       return;
     }
-    clearTimeout(fetchRetry);
-    fetchRetry = undefined;
+    clearFetchRetry();
 
     fetching = queryClient.fetchQuery({ ...options, staleTime: 0 }).then(
       () => {
         fetching = null;
         if (stopped) return;
-        fetchAttempts = 0;
+        fetchFailures = 0;
         goLive();
         if (refetchRequested) {
           refetchRequested = false;
@@ -206,15 +216,19 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
         fetching = null;
         if (stopped) return;
         refetchRequested = false;
-        fetchAttempts += 1;
-        if (fetchAttempts <= MAX_FETCH_ATTEMPTS) {
-          fetchRetry = setTimeout(() => {
-            fetchRetry = undefined;
-            ensureFetched();
-          }, retryDelayMs(fetchAttempts));
-        }
+        fetchFailures += 1;
+        clearFetchRetry();
+        fetchRetry = setTimeout(() => {
+          fetchRetry = undefined;
+          ensureFetched();
+        }, fetchRetryDelayMs(fetchFailures));
       }
     );
+  }
+
+  function clearFetchRetry(): void {
+    clearTimeout(fetchRetry);
+    fetchRetry = undefined;
   }
 
   /**
@@ -376,7 +390,7 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
   // out their own backoff).
   const unsubscribeOnline = onlineManager.subscribe((online) => {
     if (!online || stopped) return;
-    fetchAttempts = 0;
+    fetchFailures = 0;
     startTails();
     ensureFetched();
   });
@@ -394,9 +408,8 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
       stopped = true;
       abort.abort();
       unsubscribeOnline();
-      clearTimeout(fetchRetry);
+      clearFetchRetry();
       clearMissingRetry();
-      fetchRetry = undefined;
       buffer.clear();
       // Close the gate again so the next controller for this player (or a
       // fetch started before it) waits for ITS subscriptions, not ours.
