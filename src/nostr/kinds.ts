@@ -1,5 +1,5 @@
 /**
- * Nostr event kinds used by Nostr Worlds.
+ * Nostr event kinds used by Nostr Farm.
  *
  * All three are addressable (NIP-01 range 30000-39999), which is what makes the
  * "latest state per (pubkey, kind, d)" model work without any tombstoning.

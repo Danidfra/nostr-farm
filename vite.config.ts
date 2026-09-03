@@ -5,7 +5,17 @@ import { loadEnv } from 'vite';
 import { defineConfig } from 'vitest/config';
 
 // https://vitejs.dev/config/
-export default defineConfig(({ mode }) => {
+/**
+ * Where the production build is served from.
+ *
+ * The app deploys to GitHub Pages as a project site, i.e. under
+ * `https://danidfra.github.io/nostr-farm/`, not at the domain root. Every
+ * emitted asset URL, the manifest link and the router's basename derive from
+ * this one value (`import.meta.env.BASE_URL`). The dev server stays at `/`.
+ */
+export const PAGES_BASE_PATH = '/nostr-farm/';
+
+export default defineConfig(({ command, mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
 
   // Resolved at build time and inlined as a literal, so a production build with
@@ -14,6 +24,7 @@ export default defineConfig(({ mode }) => {
   const devToolsEnabled = mode === 'development' || env.VITE_ENABLE_DEV_TOOLS === 'true';
 
   return {
+    base: command === 'build' ? PAGES_BASE_PATH : '/',
     server: {
       host: '::',
       port: 8080,

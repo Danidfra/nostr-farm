@@ -93,12 +93,12 @@ describe('the reviewed template is the signed event', () => {
 
   it('carries the client tag because the TEMPLATE has it, not the publisher', async () => {
     const reviewed = carrotTemplate();
-    expect(reviewed.tags).toContainEqual(['client', 'nostr-worlds']);
+    expect(reviewed.tags).toContainEqual(['client', 'nostr-farm']);
 
     const { result } = renderHook(() => usePublishItemDefinition(), { wrapper });
     await result.current.mutateAsync({ template: reviewed });
 
-    expect(signed[0].tags.filter(([name]) => name === 'client')).toEqual([['client', 'nostr-worlds']]);
+    expect(signed[0].tags.filter(([name]) => name === 'client')).toEqual([['client', 'nostr-farm']]);
   });
 
   it('does not mutate the reviewed template object', async () => {

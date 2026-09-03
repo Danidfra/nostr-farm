@@ -1,4 +1,4 @@
-# Nostr Worlds — agent guide
+# Nostr Farm — agent guide
 
 A Nostr-native farming game. React 18 + TypeScript + Vite + TailwindCSS +
 shadcn/ui + Nostrify + TanStack Query + Vitest.

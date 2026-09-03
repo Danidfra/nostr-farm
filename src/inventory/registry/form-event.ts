@@ -41,7 +41,9 @@ export type ConversionResult<T> = { ok: true; value: T } | { ok: false; error: s
  * afterwards would be a tag the user never saw — the event shown and the event
  * signed have to be the same object.
  */
-export const CLIENT_TAG: readonly string[] = Object.freeze(['client', 'nostr-worlds']);
+export const CLIENT_TAG: readonly string[] = Object.freeze(['client', 'nostr-farm']);
+// Definitions published before the project was renamed carry
+// `['client', 'nostr-worlds']`. The tag is informational; nothing reads it.
 
 /**
  * Tag names regenerated from form state rather than preserved verbatim.

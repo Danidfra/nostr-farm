@@ -1,8 +1,13 @@
-# Nostr Worlds
+# Nostr Farm
 
 A Nostr-native farming game. Your farm is a set of addressable Nostr events
 signed by your own key — plant, water, and harvest crops on land nobody else
 can write to.
+
+Repository: <https://github.com/Danidfra/nostr-farm> · Live:
+<https://danidfra.github.io/nostr-farm/> (formerly `nostr-worlds`; the Nostr
+protocol identifiers — `farm:main`, `farm:produce:*`, `game:farm`, kinds and
+the issuer key — are unchanged by the rename).
 
 ## Quick start
 
@@ -23,6 +28,12 @@ Sign in with a NIP-07 extension, a bunker URI or an nsec, then create your farm.
 | `npm run lint` | eslint |
 | `npm run test:unit` | vitest |
 | `npm test` | typecheck + lint + unit tests + build |
+
+## Deployment
+
+Pushes to `main` deploy to GitHub Pages as a project site at
+`https://danidfra.github.io/nostr-farm/`. The build is emitted for that base
+path (`PAGES_BASE_PATH` in `vite.config.ts`); the dev server serves from `/`.
 
 ## Layout
 

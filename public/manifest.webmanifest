@@ -1,8 +1,8 @@
 {
-  "name": "Nostr Worlds — Farm",
+  "name": "Nostr Farm",
   "short_name": "Nostr Farm",
   "description": "A Nostr-native farming game. Plant, water and harvest crops on a farm you own.",
-  "start_url": "/",
+  "start_url": ".",
   "display": "standalone",
   "background_color": "#bae6fd",
   "theme_color": "#4ade80",

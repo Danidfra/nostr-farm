@@ -1,6 +1,6 @@
-# Nostr Worlds — architecture
+# Nostr Farm — architecture
 
-Nostr Worlds is a **Farm application today** with **lightweight world primitives
+Nostr Farm (formerly Nostr Worlds) is a **Farm application today** with **lightweight world primitives
 underneath**. It is not a general game engine and does not pretend to be one:
 abstractions exist only where the Farm already justifies them.
 
