@@ -117,6 +117,53 @@ describe('useFarmInventory', () => {
     expect(result.current.data?.produce).toEqual([{ definition: PUMPKIN, quantity: 2 }]);
   });
 
+  it('opens the live subscriptions before the bootstrap read goes out, so a spend landing in that window is counted', async () => {
+    network.seed(snapshotEvent({ items: { [PUMPKIN.address]: 4 } }));
+    // The authoritative read cannot complete until we say so.
+    network.holdQueries();
+    const { result } = renderHook(() => useFarmInventory(OWNER), { wrapper });
+
+    await waitFor(() => expect(network.queries.length).toBeGreaterThan(0));
+    // Every REQ was open when the very first read was sent — not after.
+    expect(network.queries[0].openSubscriptionsAtCall).toBe(2);
+    expect(network.openSubscriptions).toBe(2);
+
+    // Another game spends while the read is still out.
+    act(() => network.publish(spendEvent({ id: S1, item: PUMPKIN.address, quantity: 2, createdAt: 2_000 })));
+    expect(result.current.data).toBeUndefined(); // nothing partial
+
+    network.releaseQueries();
+    await waitFor(() => expect(result.current.data?.produce).toEqual([{ definition: PUMPKIN, quantity: 2 }]));
+    expect(result.current.data?.ledger.spends.has(S1)).toBe(true);
+
+    // One authoritative read at mount, not one per party: the snapshot filter
+    // went to each relay exactly once.
+    expect(network.queries.filter((q) => q.filters[0].kinds?.[0] === INVENTORY_KINDS.inventory)).toHaveLength(2);
+    for (const query of network.queries) expect(query.openSubscriptionsAtCall).toBe(2);
+  });
+
+  it('switching players cancels the previous player\'s pending missing-manifest retry', async () => {
+    vi.useFakeTimers();
+    try {
+      network.seed(snapshotEvent({ items: { [PUMPKIN.address]: 2 }, fold: { eventId: M1 } }));
+      const { result, rerender } = renderHook(({ owner }: { owner: string }) => useFarmInventory(owner), {
+        wrapper,
+        initialProps: { owner: OWNER },
+      });
+      await vi.waitFor(() => expect(result.current.data?.status).toBe('unresolved'));
+      const byId = () => network.queries.filter((q) => q.filters[0].ids?.includes(M1)).length;
+      expect(byId()).toBeGreaterThan(0);
+
+      act(() => rerender({ owner: STRANGER }));
+      await vi.waitFor(() => expect(result.current.data?.status).toBe('ready'));
+      const after = byId();
+      await act(() => vi.advanceTimersByTimeAsync(60 * 60_000));
+      expect(byId()).toBe(after);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('switches players cleanly: the previous player\'s subscriptions are closed and their state does not carry over', async () => {
     network.seed(snapshotEvent({ items: { [PUMPKIN.address]: 4 } }));
     const { result, rerender } = renderHook(({ owner }: { owner: string }) => useFarmInventory(owner), {

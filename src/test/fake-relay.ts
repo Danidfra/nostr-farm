@@ -22,8 +22,8 @@ interface Subscription {
 
 export class FakeRelayNetwork {
   readonly store: NostrEvent[] = [];
-  /** Every filter set ever queried, in order. */
-  readonly queries: { relay: string; filters: NostrFilter[] }[] = [];
+  /** Every filter set ever queried, in order, with how many subscriptions were open when the query was sent. */
+  readonly queries: { relay: string; filters: NostrFilter[]; openSubscriptionsAtCall: number }[] = [];
   /** Every `REQ` ever opened, including ones since closed. */
   readonly subscriptions: Subscription[] = [];
   private readonly open = new Set<Subscription>();
@@ -36,7 +36,7 @@ export class FakeRelayNetwork {
   readonly pool = {
     relay: (url: string) => ({
       query: async (filters: NostrFilter[]) => {
-        this.queries.push({ relay: url, filters });
+        this.queries.push({ relay: url, filters, openSubscriptionsAtCall: this.open.size });
         if (this.failQueries) throw this.failQueries;
         const result = this.matching(filters);
         if (this.gate) await this.gate.promise;

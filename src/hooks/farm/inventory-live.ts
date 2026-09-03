@@ -8,30 +8,36 @@ import { INVENTORY_RELAYS, openFarmLedgerTail, readFarmFoldsById } from './inven
  * Keeps the cached `farm:main` ledger current while the Farm is open.
  *
  * ```text
- *   subscribe (one REQ per inventory relay, three filters)
+ *   subscribe (one REQ per inventory relay, three filters)   ← gate opens
  *       │  events buffered
  *   authoritative fetch  ──►  commit (merge)  ──►  flush buffer  ──►  LIVE
  *                                                                     │
  *   live EVENT ─────────────────────────────────────────► admit → re-derive
  *   reconnect replay (second EOSE) / iterator ended / back online
  *                                          └──► authoritative refetch (merge)
- *   view unresolved for a missing manifest ──► fetch it by id, bounded backoff
+ *   view unresolved for a missing manifest ──► fetch it by id; one capped-
+ *                                              backoff timer while it stays missing
  * ```
  *
- * **Subscribe first, then fetch.** Every event the relay sends from the moment
- * the `REQ` is open is held until the authoritative fetch has committed, then
- * admitted on top of it. An event that lands between the fetch reading the
- * relay and the cache commit is therefore in the buffer, and an event that
- * lands after is admitted directly; there is no instant at which one can be
- * missed. Before the fetch has landed nothing is shown, because a partially
- * replayed ledger — the snapshot without its spends — is not a balance.
+ * **Subscribe first, then fetch — guaranteed, not scheduled.** The query's
+ * `queryFn` waits on a gate (`awaitLiveTails`) that this controller opens only
+ * after every relay's `REQ` has been sent. However React orders the observer's
+ * mount fetch and the effect that starts the controller, the authoritative
+ * read cannot capture relay state before the subscriptions exist. Every event
+ * the relay sends from then on is held until that read has committed, then
+ * admitted on top of it; there is no instant at which one can be missed.
+ * Before the fetch has landed nothing is shown, because a partially replayed
+ * ledger — the snapshot without its spends — is not a balance.
  *
- * **Recovery is event-driven.** A relay that reconnects re-sends the `REQ` and
- * replays (`NRelay1`); a `CLOSED` or a failed iterator is restarted with a
- * bounded backoff; going back online triggers a refetch. Each of those ends in
- * an authoritative fetch merged into the cache. There is no interval, no
- * periodic poll and no `since` watermark: every read asks for the whole ledger
- * and the merge keeps whatever is newest.
+ * **Recovery is event-driven and never terminal.** A relay that reconnects
+ * re-sends the `REQ` and replays (`NRelay1`); an ended iterator is reopened
+ * after a capped exponential backoff for as long as the controller lives; going
+ * back online triggers a refetch. Each of those ends in an authoritative fetch
+ * merged into the cache. A manifest the chain needs but no relay has served is
+ * fetched again by exact id on a single capped-backoff timer that exists only
+ * while that manifest is still missing. There is no interval, no periodic poll
+ * and no `since` watermark: every read asks for the whole ledger and the merge
+ * keeps whatever is newest.
  *
  * **Nothing here is trusted by a write.** `creditHarvest` performs its own
  * confirmed read inside the write lock; this cache is for what the player sees.
@@ -49,27 +55,98 @@ export interface FarmInventoryLive {
   stop(): void;
 }
 
-/** Backoff (ms) before attempt `n` (1-based) of a bounded retry: 2s, 4s, … capped. */
+/** Delay before the n-th (1-based) consecutive by-id retry of a missing manifest: 2s, 4s, … capped. */
+export function missingFoldRetryDelayMs(miss: number): number {
+  return Math.min(MAX_MISSING_FOLD_RETRY_MS, 2000 * 2 ** Math.max(0, miss - 1));
+}
+export const MAX_MISSING_FOLD_RETRY_MS = 5 * 60_000;
+
+/** Delay before the n-th (1-based) consecutive reopen of one relay's subscription: 2s, 4s, … capped. */
+export function tailRestartDelayMs(restart: number): number {
+  return Math.min(MAX_TAIL_RESTART_MS, 2000 * 2 ** Math.max(0, restart - 1));
+}
+export const MAX_TAIL_RESTART_MS = 2 * 60_000;
+/** A subscription that lived this long before ending resets that relay's restart backoff. */
+const STABLE_TAIL_MS = 60_000;
+
+/** Delay before retrying a failed authoritative fetch: 2s, 4s, … capped. */
 export function retryDelayMs(attempt: number): number {
   return Math.min(60_000, 1000 * 2 ** Math.min(attempt, 6));
 }
-/** Missing-manifest fetches: rounds per unresolved head before waiting for an external trigger. */
-export const MAX_MISSING_FOLD_ATTEMPTS = 6;
-/** Failed authoritative fetches before waiting for an external trigger. */
+/** Failed authoritative fetches before leaving recovery to the tails (reconnect replay) and `online`. */
 export const MAX_FETCH_ATTEMPTS = 6;
-/** Consecutive restarts of one relay's subscription before waiting for an external trigger. */
-export const MAX_TAIL_RESTARTS = 8;
-/** A subscription that lived this long before ending resets that relay's restart count. */
-const STABLE_TAIL_MS = 60_000;
+
+/**
+ * The gate between "a live controller has its subscriptions open" and "the
+ * authoritative read may go to the relays", per query client and player.
+ *
+ * Created on demand by whichever side asks first, so a `queryFn` that starts
+ * before the controller simply waits for it.
+ */
+interface LiveGate {
+  opened: Promise<void>;
+  open(): void;
+  isOpen: boolean;
+  owner: object | null;
+}
+const gates = new WeakMap<QueryClient, Map<string, LiveGate>>();
+
+function gateFor(queryClient: QueryClient, ownerPubkey: string): LiveGate {
+  let byOwner = gates.get(queryClient);
+  if (!byOwner) {
+    byOwner = new Map();
+    gates.set(queryClient, byOwner);
+  }
+  let gate = byOwner.get(ownerPubkey);
+  if (!gate) {
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const created: LiveGate = {
+      opened,
+      isOpen: false,
+      owner: null,
+      open() {
+        created.isOpen = true;
+        open();
+      },
+    };
+    gate = created;
+    byOwner.set(ownerPubkey, gate);
+  }
+  return gate;
+}
+
+/**
+ * Resolves once a live controller for this player has sent its `REQ`s to
+ * every inventory relay. Rejects if `signal` aborts first, so an unmounted
+ * query does not hang.
+ */
+export function awaitLiveTails(queryClient: QueryClient, ownerPubkey: string, signal?: AbortSignal): Promise<void> {
+  const gate = gateFor(queryClient, ownerPubkey);
+  if (gate.isOpen) return Promise.resolve();
+  if (!signal) return gate.opened;
+  if (signal.aborted) return Promise.reject(new DOMException('The signal has been aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('The signal has been aborted', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    gate.opened.then(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    });
+  });
+}
 
 export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInventoryLive {
   const { nostr, queryClient, ownerPubkey } = deps;
   const relays = deps.relays ?? INVENTORY_RELAYS;
   const key = farmInventoryQueryKey(ownerPubkey);
-  const options = farmInventoryQueryOptions(nostr, ownerPubkey);
+  const options = farmInventoryQueryOptions(nostr, queryClient, ownerPubkey);
   const readFoldsById = readFarmFoldsById(nostr);
 
   const abort = new AbortController();
+  const self = {};
   let stopped = false;
 
   // Until the first authoritative fetch has committed, live events wait here.
@@ -82,7 +159,7 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
   let fetchRetry: ReturnType<typeof setTimeout> | undefined;
 
   let missingHead = '';
-  let missingAttempts = 0;
+  let missingMisses = 0;
   let missingRetry: ReturnType<typeof setTimeout> | undefined;
   let resolving = false;
   let resolveAgain = false;
@@ -119,7 +196,6 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
         fetching = null;
         if (stopped) return;
         fetchAttempts = 0;
-        missingAttempts = 0;
         goLive();
         if (refetchRequested) {
           refetchRequested = false;
@@ -141,7 +217,12 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
     );
   }
 
-  /** The fetch has committed: replay what the tail held, then admit directly. */
+  /**
+   * The fetch has committed: replay what the tail held, then admit directly.
+   *
+   * The phase flips and the buffer drains in one synchronous step, so no event
+   * can land between "we stopped buffering" and "we flushed the buffer".
+   */
   function goLive(): void {
     if (phase === 'buffering') {
       phase = 'live';
@@ -155,11 +236,13 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
   /**
    * If the committed view is unresolved for want of a manifest, fetch it by id.
    *
-   * One round per call; a round that makes progress (a deeper link now
-   * missing) continues at once, a round that finds nothing waits out a bounded
-   * backoff. A different missing head resets the count. A view unresolved for
-   * any other reason — a foreign, malformed or cyclic manifest — is left
-   * alone: fetching will not fix it.
+   * One round per call. A round that makes progress (a deeper link is now the
+   * missing one) continues at once; a round that finds nothing arms ONE timer
+   * for the next attempt, at a delay that doubles up to a cap, and the timer
+   * exists only as long as that manifest is still missing: a manifest arriving
+   * live, the chain resolving, a different missing head, or `stop()` all
+   * clear it. A view unresolved for any other reason — a foreign, malformed or
+   * cyclic manifest — reports nothing missing, and nothing is fetched.
    */
   function settleMissingFolds(): void {
     if (stopped || phase !== 'live') return;
@@ -167,9 +250,8 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
     const missing = view?.status === 'unresolved' ? view.missingFolds : [];
     if (missing.length === 0) {
       missingHead = '';
-      missingAttempts = 0;
-      clearTimeout(missingRetry);
-      missingRetry = undefined;
+      missingMisses = 0;
+      clearMissingRetry();
       return;
     }
     if (resolving) {
@@ -179,16 +261,14 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
 
     const head = missing.map((reference) => reference.eventId).sort().join(',');
     if (head !== missingHead) {
-      // Something new to look for: start its budget afresh, and do not wait
-      // out a backoff that was scheduled for the previous head.
+      // Something new to look for: start its backoff afresh, and do not wait
+      // out a deadline that was armed for the previous head.
       missingHead = head;
-      missingAttempts = 0;
-      clearTimeout(missingRetry);
-      missingRetry = undefined;
+      missingMisses = 0;
+      clearMissingRetry();
     }
-    if (missingRetry !== undefined || missingAttempts >= MAX_MISSING_FOLD_ATTEMPTS) return;
+    if (missingRetry !== undefined) return;
 
-    missingAttempts += 1;
     resolving = true;
     void readFoldsById(missing)
       .then((fetched) => {
@@ -197,12 +277,12 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
           // Progress: the view changed, so look again at once for whatever the
           // chain needs next (the next `previous` link, typically).
           resolveAgain = true;
-        } else if (missingAttempts < MAX_MISSING_FOLD_ATTEMPTS) {
-          settleMissingFoldsLater(retryDelayMs(missingAttempts));
+        } else {
+          armMissingRetry();
         }
       })
       .catch(() => {
-        if (!stopped && missingAttempts < MAX_MISSING_FOLD_ATTEMPTS) settleMissingFoldsLater(retryDelayMs(missingAttempts));
+        if (!stopped) armMissingRetry();
       })
       .finally(() => {
         resolving = false;
@@ -213,12 +293,18 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
       });
   }
 
-  function settleMissingFoldsLater(delay: number): void {
-    clearTimeout(missingRetry);
+  function armMissingRetry(): void {
+    missingMisses += 1;
+    clearMissingRetry();
     missingRetry = setTimeout(() => {
       missingRetry = undefined;
       settleMissingFolds();
-    }, delay);
+    }, missingFoldRetryDelayMs(missingMisses));
+  }
+
+  function clearMissingRetry(): void {
+    clearTimeout(missingRetry);
+    missingRetry = undefined;
   }
 
   /**
@@ -228,18 +314,30 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
    * reconnects and the relay replays into the same iterator, signalling the end
    * of each replay with an `EOSE`. An `EOSE` after the first one is therefore
    * the sign of a reconnect, and the cue for an authoritative refetch. If the
-   * iterator does end — `CLOSED`, or a failure — it is reopened after a
-   * bounded backoff, and a refetch covers whatever was missed in between.
+   * iterator does end — `CLOSED`, or a failure — it is reopened after a capped
+   * exponential backoff, for as long as this controller lives; a subscription
+   * that held for a while resets the backoff. The refetch that covers whatever
+   * was missed is issued only AFTER the new `REQ` is out, for the same reason
+   * the bootstrap fetch waits on the gate.
    */
   async function tail(relay: string): Promise<void> {
     tails.set(relay, true);
     let restarts = 0;
     try {
       while (!stopped) {
-        let eoseSeen = false;
         const openedAt = Date.now();
+        // `next()` runs the generator up to its first await, which is after the
+        // `REQ` has been sent (NRelay1) — so once it returns, we are subscribed.
+        const iterator = openFarmLedgerTail(nostr, ownerPubkey, relay, abort.signal)[Symbol.asyncIterator]();
+        let pending = iterator.next();
+        if (restarts > 0) ensureFetched();
+
+        let eoseSeen = false;
         try {
-          for await (const message of openFarmLedgerTail(nostr, ownerPubkey, relay, abort.signal)) {
+          for (;;) {
+            const result = await pending;
+            if (result.done) break;
+            const message = result.value;
             if (message[0] === 'EVENT') {
               admit(message[2]);
             } else if (message[0] === 'EOSE') {
@@ -248,9 +346,12 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
             } else if (message[0] === 'CLOSED') {
               break;
             }
+            pending = iterator.next();
           }
         } catch {
           // Aborted by `stop()`, or the relay failed: both fall through.
+        } finally {
+          void iterator.return?.().catch(() => {});
         }
         if (stopped) return;
 
@@ -258,10 +359,7 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
         // hiccup, not one more failure of a relay that keeps refusing us.
         if (Date.now() - openedAt >= STABLE_TAIL_MS) restarts = 0;
         restarts += 1;
-        if (restarts > MAX_TAIL_RESTARTS) return;
-        await sleep(retryDelayMs(restarts), abort.signal);
-        if (stopped) return;
-        ensureFetched();
+        await sleep(tailRestartDelayMs(restarts), abort.signal);
       }
     } finally {
       tails.set(relay, false);
@@ -274,16 +372,21 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
     }
   }
 
-  // Back online: reopen any tail that gave up, and read the ledger afresh.
+  // Back online: read the ledger afresh (the tails are still open, or waiting
+  // out their own backoff).
   const unsubscribeOnline = onlineManager.subscribe((online) => {
     if (!online || stopped) return;
     fetchAttempts = 0;
-    missingAttempts = 0;
     startTails();
     ensureFetched();
   });
 
+  // Order matters: every REQ is out before the gate opens, and the gate is
+  // open before the bootstrap read is allowed to touch a relay.
+  const gate = gateFor(queryClient, ownerPubkey);
+  gate.owner = self;
   startTails();
+  gate.open();
   ensureFetched();
 
   return {
@@ -292,10 +395,13 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
       abort.abort();
       unsubscribeOnline();
       clearTimeout(fetchRetry);
-      clearTimeout(missingRetry);
+      clearMissingRetry();
       fetchRetry = undefined;
-      missingRetry = undefined;
       buffer.clear();
+      // Close the gate again so the next controller for this player (or a
+      // fetch started before it) waits for ITS subscriptions, not ours.
+      const byOwner = gates.get(queryClient);
+      if (byOwner?.get(ownerPubkey)?.owner === self) byOwner.delete(ownerPubkey);
     },
   };
 }

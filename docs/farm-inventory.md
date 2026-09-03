@@ -72,6 +72,10 @@ authoritative fetch → commit (merge) → flush held events → live
 live EVENT → admit → re-derive → UI
 ```
 
+The order is enforced, not scheduled: the query's `queryFn` waits on a gate
+the controller opens only after every `REQ` has been sent, so React's own
+ordering of the mount fetch and the effect cannot put the read first.
+
 - **Admission** is a gate, not a derivation: an event enters only if it is the
   owner's own, well-formed per the package's parser, and scoped to the full
   `31633:<player>:farm:main` address. Whether a spend is pending, folded,
@@ -86,11 +90,16 @@ live EVENT → admit → re-derive → UI
   chain then excludes the spend that the old view was subtracting. `4 − 2 = 2`
   becomes a snapshot of `2` with nothing pending — never `0`. A snapshot whose
   manifest has not arrived yet is *unresolved* (see below) until it does; the
-  live side fetches the missing manifest by id, with a bounded backoff.
+  live side fetches the missing manifest by exact id, and while it stays
+  missing keeps one timer armed for the next attempt at a delay that doubles
+  up to five minutes. The timer exists only because that manifest is missing:
+  its arrival, resolution, a different missing head, or unmount clears it.
 - **Recovery is event-driven, not polled.** A relay reconnect re-sends the
   `REQ` and replays (Nostrify); the second `EOSE` triggers an authoritative
-  refetch. A `CLOSED` or failed subscription is reopened after a bounded
-  backoff, followed by a refetch. Coming back online refetches. There is no
+  refetch. A `CLOSED` or failed subscription is reopened after a capped
+  exponential backoff for as long as the Farm is open, and the refetch that
+  covers the gap is sent only after the new `REQ` is out. Coming back online
+  refetches. There is no
   interval and no `since` watermark: every read asks for the whole ledger and
   the merge keeps what is newest.
 - **Nothing partial is shown.** Until the first authoritative fetch has

@@ -22,7 +22,7 @@ import { PRODUCE_CATALOG, PRODUCE_CROP_IDS, type ProduceDefinition } from '@/inv
 import type { GameInventory } from '@/inventory/package';
 import type { EventReference } from '@/inventory/relay-io';
 import { farmInventoryReadDeps } from './inventory-relays';
-import { startFarmInventoryLive } from './inventory-live';
+import { awaitLiveTails, startFarmInventoryLive } from './inventory-live';
 
 export const FARM_INVENTORY_KEY = 'farm-inventory';
 
@@ -64,13 +64,18 @@ export interface FarmInventoryView {
  * it. Shared by the hook, the live tail and the harvest write-back so that all
  * three commit through the same merge.
  *
+ * `queryFn` does not touch a relay until the live controller for this player
+ * has its subscriptions open (`awaitLiveTails`). `useQuery` starts its mount
+ * fetch before the effect that starts the controller runs; without the gate,
+ * an event landing between the read and the `REQ` would be in neither.
+ *
  * `structuralSharing` is where a fetched result meets the cache. TanStack calls
  * it at COMMIT time with the data the cache holds right then, so a spend that
  * arrived live while the fetch was in flight is merged into the fetched result
  * rather than overwritten by it. Reconciling inside `queryFn` would not do:
  * that runs before the commit, and the race is precisely between the two.
  */
-export function farmInventoryQueryOptions(nostr: NPool, ownerPubkey: string | undefined) {
+export function farmInventoryQueryOptions(nostr: NPool, queryClient: QueryClient, ownerPubkey: string | undefined) {
   return queryOptions<FarmInventoryView>({
     queryKey: farmInventoryQueryKey(ownerPubkey),
     staleTime: 15_000,
@@ -78,6 +83,7 @@ export function farmInventoryQueryOptions(nostr: NPool, ownerPubkey: string | un
       mergeFarmInventoryViews(previous as FarmInventoryView | undefined, next as FarmInventoryView),
     queryFn: async ({ signal }) => {
       if (!ownerPubkey) return emptyView(emptyLedger(''));
+      await awaitLiveTails(queryClient, ownerPubkey, signal);
       return fetchFarmInventoryView(nostr, ownerPubkey, signal);
     },
   });
@@ -114,7 +120,9 @@ async function fetchFarmInventoryView(nostr: NPool, ownerPubkey: string, signal:
  * Live: while the hook is mounted, one subscription per inventory relay tails
  * the ledger (see `inventory-live.ts`), so a spend another game publishes
  * lowers the counter without a refresh, and a snapshot the Farm publishes
- * elsewhere replaces it.
+ * elsewhere replaces it. The query's own mount fetch waits for those
+ * subscriptions to be open, and the controller's bootstrap fetch joins it
+ * rather than starting a second one.
  *
  * READ ONLY — it never publishes and never creates an inventory. A resolved
  * `null` here is display state; it is emphatically NOT the base a write may
@@ -125,7 +133,7 @@ export function useFarmInventory(ownerPubkey: string | undefined) {
   const { nostr } = useNostr();
   const queryClient = useQueryClient();
 
-  const query = useQuery({ ...farmInventoryQueryOptions(nostr, ownerPubkey), enabled: !!ownerPubkey });
+  const query = useQuery({ ...farmInventoryQueryOptions(nostr, queryClient, ownerPubkey), enabled: !!ownerPubkey });
 
   useEffect(() => {
     if (!ownerPubkey) return;

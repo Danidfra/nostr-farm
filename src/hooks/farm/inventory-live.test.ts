@@ -7,7 +7,7 @@ import { PRODUCE_CATALOG } from '@/inventory/produce-catalog';
 import { FakeRelayNetwork } from '@/test/fake-relay';
 import { OWNER, OTHER_GAME_ADDRESS, STRANGER, eventId, foldEvent, snapshotEvent, spendEvent } from '@/test/inventory-fixtures';
 
-import { MAX_MISSING_FOLD_ATTEMPTS, retryDelayMs, startFarmInventoryLive, type FarmInventoryLive } from './inventory-live';
+import { missingFoldRetryDelayMs, startFarmInventoryLive, tailRestartDelayMs, type FarmInventoryLive } from './inventory-live';
 import { farmInventoryQueryKey, type FarmInventoryView } from './useFarmInventory';
 
 const RELAYS = ['wss://one.example', 'wss://two.example'] as const;
@@ -45,6 +45,26 @@ function recordViews(): FarmInventoryView[] {
 }
 
 const S1 = () => snapshotEvent({ id: eventId('snap1'), createdAt: 1_000, revision: 30, items: { [PUMPKIN.address]: 4 } });
+/** A snapshot whose manifest M1 is not on any relay yet. */
+const S2_MISSING_M1 = () => snapshotEvent({ id: eventId('snap2'), createdAt: 3_001, revision: 31, items: { [PUMPKIN.address]: 2 }, fold: { eventId: M1 } });
+
+/** Settle every pending promise under fake timers without advancing the clock. */
+async function flush(): Promise<void> {
+  for (let i = 0; i < 6; i += 1) await vi.advanceTimersByTimeAsync(0);
+}
+
+/**
+ * Wait for `predicate` under fake timers WITHOUT moving the clock, so a timer
+ * armed meanwhile keeps its full delay. (`vi.waitFor` advances time as it
+ * polls, which would silently eat into the deadlines these tests measure.)
+ */
+async function until(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 50; i += 1) {
+    if (predicate()) return;
+    await flush();
+  }
+  throw new Error('condition not met without advancing time');
+}
 
 beforeEach(() => {
   network = new FakeRelayNetwork();
@@ -194,8 +214,42 @@ describe('farm inventory live tail', () => {
     network.publish(spendEvent({ id: A, item: PUMPKIN.address, quantity: 2, createdAt: 2_000 }));
     expect(pumpkins()).toBe(4);
 
-    await vi.advanceTimersByTimeAsync(retryDelayMs(1));
+    await vi.advanceTimersByTimeAsync(tailRestartDelayMs(1));
     await vi.waitFor(() => expect(pumpkins()).toBe(2));
+    expect(network.openSubscriptions).toBe(RELAYS.length);
+  });
+
+  it('F: a relay that keeps closing the subscription is reopened past any fixed limit, and recovers on its own once healthy', async () => {
+    vi.useFakeTimers();
+    network.seed(S1());
+    start();
+    await until(() => pumpkins() === 4);
+
+    // Ten consecutive failures — beyond the eight the old code gave up after.
+    for (let restart = 1; restart <= 10; restart += 1) {
+      network.closeAll();
+      await flush();
+      expect(network.openSubscriptions).toBe(0);
+      await vi.advanceTimersByTimeAsync(tailRestartDelayMs(restart) - 1);
+      expect(network.openSubscriptions).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      await flush();
+      expect(network.openSubscriptions).toBe(RELAYS.length);
+    }
+    expect(tailRestartDelayMs(10)).toBe(120_000);
+
+    // Now the relay stays healthy: the reopened tails are live, one per relay.
+    network.publish(spendEvent({ id: A, item: PUMPKIN.address, quantity: 2, createdAt: 2_000 }));
+    await flush();
+    expect(pumpkins()).toBe(2);
+    expect(network.openSubscriptions).toBe(RELAYS.length);
+
+    // A subscription that held for a while resets the backoff to the first step.
+    await vi.advanceTimersByTimeAsync(61_000);
+    network.closeAll();
+    await flush();
+    await vi.advanceTimersByTimeAsync(tailRestartDelayMs(1));
+    await flush();
     expect(network.openSubscriptions).toBe(RELAYS.length);
   });
 
@@ -256,12 +310,12 @@ describe('farm inventory live tail', () => {
     expect(attemptsSoFar).toBeGreaterThan(0);
 
     // The manifest becomes retrievable only after the first retry has failed.
-    await vi.advanceTimersByTimeAsync(retryDelayMs(1));
+    await vi.advanceTimersByTimeAsync(missingFoldRetryDelayMs(1));
     await vi.waitFor(() => expect(byId()).toBeGreaterThan(attemptsSoFar));
     expect(view()?.status).toBe('unresolved');
 
     network.seed(foldEvent({ id: M1, spends: [A], createdAt: 3_000 }));
-    await vi.advanceTimersByTimeAsync(retryDelayMs(2));
+    await vi.advanceTimersByTimeAsync(missingFoldRetryDelayMs(2));
     await vi.waitFor(() => expect(view()?.status).toBe('ready'));
     expect(pumpkins()).toBe(2);
 
@@ -299,40 +353,99 @@ describe('farm inventory live tail', () => {
     expect(pumpkins()).toBe(1);
   });
 
-  it('H: retries are bounded, and a manifest that cannot be fixed by fetching is not retried at all', async () => {
+  it('H: retries keep going past the old six-attempt boundary, exactly at each deadline, until a later retry resolves it on its own', async () => {
     vi.useFakeTimers();
-    network.seed(snapshotEvent({ id: eventId('snap2'), createdAt: 3_001, revision: 31, items: { [PUMPKIN.address]: 2 }, fold: { eventId: M1 } }));
+    network.seed(S2_MISSING_M1());
     start();
-    await vi.waitFor(() => expect(view()?.status).toBe('unresolved'));
+    await until(() => view()?.status === 'unresolved');
+    await flush();
     const byId = () => network.queries.filter((q) => q.filters[0].ids?.includes(M1)).length;
+    expect(byId()).toBeGreaterThan(0);
 
-    for (let i = 0; i < MAX_MISSING_FOLD_ATTEMPTS + 3; i += 1) await vi.advanceTimersByTimeAsync(60_000);
-    const settled = byId();
-    await vi.advanceTimersByTimeAsync(600_000);
-    expect(byId()).toBe(settled);
-    expect(view()?.status).toBe('unresolved');
-    expect(view()?.produce).toEqual([]);
+    for (let miss = 1; miss <= 9; miss += 1) {
+      const delay = missingFoldRetryDelayMs(miss);
+      const before = network.queries.length;
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(network.queries.length).toBe(before); // nothing before the deadline
+      await vi.advanceTimersByTimeAsync(1);
+      await flush();
+      // Exactly one round at the deadline: the exact id, once per relay.
+      const round = network.queries.slice(before);
+      expect(round.length).toBeGreaterThan(0);
+      expect(new Set(round.map((q) => q.relay)).size).toBe(round.length);
+      for (const query of round) expect(query.filters[0].ids).toEqual([M1]);
+      expect(view()?.status).toBe('unresolved');
+      expect(view()?.produce).toEqual([]);
+    }
+    expect(missingFoldRetryDelayMs(9)).toBe(5 * 60_000); // capped by now
 
-    // A stranger's manifest under that id never enters the ledger, so the
-    // chain is still missing its head — and the budget for it is spent.
-    network.publish(foldEvent({ id: M1, pubkey: STRANGER, spends: [A] }));
-    await vi.advanceTimersByTimeAsync(10);
-    expect(view()?.status).toBe('unresolved');
-    expect(view()?.ledger.folds.size).toBe(0);
-    expect(byId()).toBe(settled);
+    // The relay finally serves the manifest. No live event, no reconnect, no
+    // online transition: the next autonomous retry resolves the inventory.
+    network.seed(foldEvent({ id: M1, spends: [A], createdAt: 3_000 }));
+    await vi.advanceTimersByTimeAsync(missingFoldRetryDelayMs(10));
+    await flush();
+    expect(view()?.status).toBe('ready');
+    expect(pumpkins()).toBe(2);
 
-    // A chain that is present but cyclic is unresolved for a reason no fetch
-    // can fix: nothing is reported missing and nothing is fetched.
+    // Resolved: no timer is left, so nothing is fetched afterwards.
+    const settled = network.queries.length;
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(network.queries.length).toBe(settled);
+  });
+
+  it('H: a manifest arriving live before the deadline cancels the pending retry', async () => {
+    vi.useFakeTimers();
+    network.seed(S2_MISSING_M1());
+    start();
+    await until(() => view()?.status === 'unresolved');
+    await flush();
+    const byId = () => network.queries.filter((q) => q.filters[0].ids?.includes(M1)).length;
+    const before = byId();
+
+    network.publish(foldEvent({ id: M1, spends: [A], createdAt: 3_000 }));
+    await flush();
+    expect(view()?.status).toBe('ready');
+    expect(pumpkins()).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(byId()).toBe(before);
+  });
+
+  it('H: stopping cancels a pending retry', async () => {
+    vi.useFakeTimers();
+    network.seed(S2_MISSING_M1());
+    const controller = start();
+    await until(() => view()?.status === 'unresolved');
+    await flush();
+
+    controller.stop();
+    const after = network.queries.length;
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(network.queries.length).toBe(after);
+  });
+
+  it('H: a chain that is present but cyclic reports nothing missing, and nothing is fetched for it', async () => {
+    vi.useFakeTimers();
     const M2 = eventId('m2');
-    network.publish(foldEvent({ id: M2, spends: [A], previous: { eventId: M1 } }));
-    network.publish(foldEvent({ id: M1, spends: [A], previous: { eventId: M2 } }));
-    await vi.advanceTimersByTimeAsync(10);
-    expect(view()?.status).toBe('unresolved');
+    network.seed(S2_MISSING_M1());
+    network.seed(foldEvent({ id: M2, spends: [A], previous: { eventId: M1 } }));
+    network.seed(foldEvent({ id: M1, spends: [A], previous: { eventId: M2 } }));
+    start();
+    await until(() => view()?.status === 'unresolved');
+    await flush();
     expect(view()?.problems.join(' ')).toMatch(/revisits/i);
     expect(view()?.missingFolds).toEqual([]);
-    const afterCycle = network.queries.length;
-    await vi.advanceTimersByTimeAsync(600_000);
-    expect(network.queries.length).toBe(afterCycle);
+    expect(view()?.produce).toEqual([]);
+
+    const settled = network.queries.length;
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(network.queries.length).toBe(settled);
+
+    // A stranger's manifest under a missing id never enters the ledger either.
+    network.seed(snapshotEvent({ id: eventId('snap3'), createdAt: 4_000, revision: 32, items: { [PUMPKIN.address]: 2 }, fold: { eventId: eventId('m3') } }));
+    network.publish(foldEvent({ id: eventId('m3'), pubkey: STRANGER, spends: [A] }));
+    await flush();
+    expect(view()?.ledger.folds.has(eventId('m3'))).toBe(false);
   });
 
   it('I: stopping one player\'s tail before starting the next leaks nothing across', async () => {
