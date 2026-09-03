@@ -1,33 +1,28 @@
-import { useSeoMeta } from "@unhead/react";
-import { useLocation } from "react-router-dom";
-import { useEffect } from "react";
+import { useSeoMeta } from '@unhead/react';
+import { Link } from 'react-router-dom';
 
-const NotFound = () => {
-  const location = useLocation();
+import { Button } from '@/components/ui/button';
 
+/**
+ * Unknown route. The home link goes through the router so it lands on the
+ * farm under whatever basename the app is served from (the GitHub Pages
+ * project path in production), rather than the domain root.
+ */
+export default function NotFound() {
   useSeoMeta({
-    title: "404 - Page Not Found",
-    description: "The page you are looking for could not be found. Return to the home page to continue browsing.",
+    title: 'Page not found — Nostr Farm',
+    description: 'That path is not part of the farm.',
   });
 
-  useEffect(() => {
-    console.error(
-      "404 Error: User attempted to access non-existent route:",
-      location.pathname
-    );
-  }, [location.pathname]);
-
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
+    <div className="flex min-h-screen items-center justify-center bg-background p-6 text-foreground">
       <div className="text-center">
-        <h1 className="text-4xl font-bold mb-4 text-gray-900 dark:text-gray-100">404</h1>
-        <p className="text-xl text-gray-600 dark:text-gray-400 mb-4">Oops! Page not found</p>
-        <a href="/" className="text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 underline">
-          Return to Home
-        </a>
+        <p className="text-6xl font-bold">404</p>
+        <p className="mt-2 text-lg text-muted-foreground">That path is not part of the farm.</p>
+        <Button asChild className="mt-6">
+          <Link to="/">Back to your farm</Link>
+        </Button>
       </div>
     </div>
   );
-};
-
-export default NotFound;
+}
