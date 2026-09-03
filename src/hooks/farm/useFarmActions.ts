@@ -21,6 +21,7 @@ import { farmInventoryQueryKey, setFarmInventory } from './useFarmInventory';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
 import { useToast } from '@/hooks/useToast';
+import { ACTION_REJECTION_MESSAGES } from '@/components/farm/copy';
 
 export interface FarmActionInput {
   mapId: string;
@@ -50,16 +51,6 @@ export class HarvestFailedError extends Error {
   }
 }
 
-const MESSAGES: Record<string, string> = {
-  unknown_action: 'That action does not exist.',
-  unknown_crop: 'That crop is not in the catalog.',
-  slot_occupied: 'Something is already growing here.',
-  slot_empty: 'There is nothing planted here.',
-  plant_rotten: 'This crop has rotted — clear it first.',
-  plant_not_rotten: 'This crop is still alive.',
-  not_ready: 'This crop is not ready to harvest yet.',
-  already_saturated: 'This crop is already as wet as it can get.',
-};
 
 /**
  * Perform a farm action.
@@ -201,7 +192,7 @@ export function useFarmActions() {
         variant: 'destructive',
         title: error instanceof HarvestFailedError && error.phase === 'slot' ? 'Crop not cleared' : 'Action failed',
         description:
-          error instanceof FarmActionRejectedError ? (MESSAGES[error.reason] ?? error.reason) : error.message,
+          error instanceof FarmActionRejectedError ? (ACTION_REJECTION_MESSAGES[error.reason] ?? error.reason) : error.message,
       });
     },
 

@@ -58,6 +58,11 @@ function normalizeAssetPath(path: string): string {
   return `assets/${clean}`;
 }
 
+/** The pinned URL of one asset of a release, without loading the pack. */
+export function renderpackAssetUrl(release: RenderpackRelease, path: string): string {
+  return joinUrl(release.baseUrl, normalizeAssetPath(path));
+}
+
 function parseSprites(raw: unknown, release: RenderpackRelease, url: string): Record<string, CropSprite> {
   if (!isRecord(raw) || !isRecord(raw.crops)) {
     throw new RenderpackLoadError('Renderpack crops.json has no `crops` dictionary.', { ref: formatRenderpackRef(release), url });
@@ -111,6 +116,6 @@ export async function loadRenderpack(ref: RenderpackRef, signal?: AbortSignal): 
     manifest,
     tileSize: manifest.tileSize,
     sprites: Object.freeze(sprites),
-    assetUrl: (path: string) => joinUrl(release.baseUrl, normalizeAssetPath(path)),
+    assetUrl: (path: string) => renderpackAssetUrl(release, path),
   };
 }

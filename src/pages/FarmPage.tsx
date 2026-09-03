@@ -4,11 +4,11 @@ import { useSeoMeta } from '@unhead/react';
 import type { FarmSlot } from '@/farm/slots/types';
 import type { FarmActionType } from '@/farm/slots/actions';
 import { RenderpackLoadError } from '@/world/renderpack/types';
-import { CreateFarmPanel, FarmErrorPanel, SignInPanel } from '@/components/farm/FarmGate';
+import { CreateFarmPanel, FarmErrorPanel, LoadingFieldPanel, WelcomePanel } from '@/components/farm/FarmGate';
+import { ERRORS } from '@/components/farm/copy';
 import { FarmField } from '@/components/farm/FarmField';
 import { FarmTopBar } from '@/components/farm/FarmTopBar';
 import { SeedPicker } from '@/components/farm/SeedPicker';
-import { Skeleton } from '@/components/ui/skeleton';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNowSeconds } from '@/hooks/useClock';
 import { useCreateFarm } from '@/hooks/farm/useCreateFarm';
@@ -68,14 +68,15 @@ export default function FarmPage() {
       />
 
       <main className="relative flex-1 overflow-hidden">
-        {!user && <SignInPanel />}
+        {!user && <WelcomePanel />}
 
-        {user && farm.isLoading && <LoadingField />}
+        {user && farm.isLoading && <LoadingFieldPanel />}
 
         {user && farm.isError && (
           <FarmErrorPanel
-            title="Could not load your farm"
-            message={farm.error instanceof Error ? farm.error.message : 'Unknown error.'}
+            title={ERRORS.farmTitle}
+            message={ERRORS.farmMessage}
+            detail={farm.error instanceof Error ? farm.error.message : 'Unknown error.'}
             onRetry={() => farm.refetch()}
           />
         )}
@@ -84,12 +85,13 @@ export default function FarmPage() {
           <CreateFarmPanel onCreate={(name) => void createFarm({ name })} isCreating={isCreating} />
         )}
 
-        {user && farm.data && renderpack.isLoading && <LoadingField />}
+        {user && farm.data && renderpack.isLoading && <LoadingFieldPanel />}
 
         {user && farm.data && renderpack.isError && (
           <FarmErrorPanel
-            title="Renderpack failed to load"
-            message={describeRenderpackError(renderpack.error)}
+            title={ERRORS.artworkTitle}
+            message={ERRORS.artworkMessage}
+            detail={describeRenderpackError(renderpack.error)}
             onRetry={() => renderpack.refetch()}
           />
         )}
@@ -115,14 +117,6 @@ export default function FarmPage() {
           />
         )}
       </main>
-    </div>
-  );
-}
-
-function LoadingField() {
-  return (
-    <div className="flex h-full items-center justify-center p-8">
-      <Skeleton className="h-full w-full max-w-4xl rounded-xl" />
     </div>
   );
 }
