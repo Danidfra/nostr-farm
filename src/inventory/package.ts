@@ -132,16 +132,3 @@ export const INVENTORY_KINDS = {
  * inventory context and must never read or write another game's.
  */
 export const FARM_INVENTORY_CONTEXT = 'farm:main';
-
-export interface InventoryPackageStatus {
-  installed: boolean;
-  reason: string;
-}
-
-export function inventoryPackageStatus(): InventoryPackageStatus {
-  return {
-    installed: true,
-    reason:
-      '@nostr-games/inventory provides kind:31632 for the Item Registry, kind:31633 for the farm:main produce inventory, and kind:1416/1417 for cross-game spends against it.',
-  };
-}

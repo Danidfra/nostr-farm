@@ -1,10 +1,14 @@
 {
   "name": "Nostr Farm",
   "short_name": "Nostr Farm",
-  "description": "A Nostr-native farming game. Plant, water and harvest crops on a farm you own.",
+  "description": "A cozy farming game where your farm belongs to your Nostr identity. Plant, water and harvest crops, and keep the produce.",
   "start_url": ".",
   "display": "standalone",
-  "background_color": "#bae6fd",
-  "theme_color": "#4ade80",
-  "icons": []
+  "background_color": "#EFE5CF",
+  "theme_color": "#4F8A3A",
+  "icons": [
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
 }

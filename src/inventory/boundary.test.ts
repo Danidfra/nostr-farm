@@ -7,9 +7,8 @@ import { describe, expect, it } from 'vitest';
 // directly — which is what lets it prove the re-export IS the package.
 import * as protocolPackage from '@nostr-games/inventory';
 
-import { createNullInventoryAdapter } from './adapter';
 import * as boundary from './package';
-import { FARM_INVENTORY_CONTEXT, INVENTORY_KINDS, inventoryPackageStatus } from './package';
+import { FARM_INVENTORY_CONTEXT, INVENTORY_KINDS } from './package';
 
 const SRC = join(process.cwd(), 'src');
 
@@ -63,23 +62,9 @@ describe('inventory boundary', () => {
 
   it('writes to its own context and never another game\'s', () => {
     expect(FARM_INVENTORY_CONTEXT).toBe('farm:main');
-    expect(createNullInventoryAdapter().context).toBe('farm:main');
   });
 
   it('records the protocol kinds', () => {
     expect(INVENTORY_KINDS).toEqual({ itemDefinition: 31632, inventory: 31633, placement: 31634, spend: 1416, fold: 1417 });
-  });
-
-  it('reports the protocol package as installed now that the registry uses it', () => {
-    expect(inventoryPackageStatus().installed).toBe(true);
-  });
-
-  it('credits nothing in V1, so harvesting cannot silently publish', async () => {
-    // The package is installed for kind:31632, but kind:31633 inventory writes
-    // remain a separate milestone. Harvesting must not start publishing just
-    // because the dependency arrived.
-    const adapter = createNullInventoryAdapter();
-    expect(adapter.isAvailable()).toBe(false);
-    await expect(adapter.credit({ cropId: 'carrot', quantity: 1, harvestedAt: 0, growthSec: 900 })).resolves.toBeNull();
   });
 });

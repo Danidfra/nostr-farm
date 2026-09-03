@@ -81,11 +81,9 @@ export function useNostrPublish(): UseMutationResult<NostrEvent, Error, Partial<
       console.error("Failed to publish event:", error);
     },
     onSuccess: (event) => {
-      // Log success
-      console.log("Event published successfully:", {
-        kind: event.kind,
-        id: event.id,
-      });
+      if (process.env.NODE_ENV === 'development') {
+        console.debug('[useNostrPublish] published', { kind: event.kind, id: event.id });
+      }
     },
   });
 }
