@@ -14,7 +14,8 @@ import { useNowSeconds } from '@/hooks/useClock';
 import { useCreateFarm } from '@/hooks/farm/useCreateFarm';
 import { useFarm } from '@/hooks/farm/useFarm';
 import { useFarmActions } from '@/hooks/farm/useFarmActions';
-import { readSlot, useFarmSlots } from '@/hooks/farm/useFarmSlots';
+import { readSlot, readSlotRecord, useFarmSlots } from '@/hooks/farm/useFarmSlots';
+import { useFarmInventory } from '@/hooks/farm/useFarmInventory';
 import { useRenderpack } from '@/hooks/farm/useRenderpack';
 
 /**
@@ -35,6 +36,7 @@ export default function FarmPage() {
   const slots = useFarmSlots(user?.pubkey, farm.data?.map.id);
   const renderpack = useRenderpack(farm.data?.world.renderpack);
   const { act, isActing } = useFarmActions();
+  const inventory = useFarmInventory(user?.pubkey);
 
   const [seedTarget, setSeedTarget] = useState<FarmSlot | null>(null);
 
@@ -48,14 +50,21 @@ export default function FarmPage() {
   const runAction = useCallback(
     (slot: FarmSlot, type: FarmActionType, cropId?: string) => {
       if (!mapId) return;
-      void act({ mapId, slot, type, cropId });
+      // The record carries the source event id, which harvest needs as its
+      // idempotency key.
+      const record = readSlotRecord(slots.data, mapId, slot.coord.x, slot.coord.y);
+      void act({ mapId, record, type, cropId });
     },
-    [act, mapId]
+    [act, mapId, slots.data]
   );
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-gradient-to-b from-sky-300 to-green-200 dark:from-sky-900 dark:to-green-950">
-      <FarmTopBar farmName={farm.data?.world.name} renderpack={farm.data?.world.renderpack} />
+      <FarmTopBar
+        farmName={farm.data?.world.name}
+        renderpack={farm.data?.world.renderpack}
+        produce={inventory.data?.produce}
+      />
 
       <main className="relative flex-1 overflow-hidden">
         {!user && <SignInPanel />}

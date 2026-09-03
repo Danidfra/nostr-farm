@@ -12,9 +12,11 @@ import { ThemeToggle } from '@/components/ThemeToggle';
 interface FarmTopBarProps {
   farmName?: string;
   renderpack?: RenderpackRef;
+  /** Official Farm produce currently held, for the compact counter. */
+  produce?: { definition: { name: string; emoji: string }; quantity: number }[];
 }
 
-export function FarmTopBar({ farmName, renderpack }: FarmTopBarProps) {
+export function FarmTopBar({ farmName, renderpack, produce }: FarmTopBarProps) {
   const { user, metadata } = useCurrentUser();
   const { logout } = useLoginActions();
 
@@ -33,6 +35,16 @@ export function FarmTopBar({ farmName, renderpack }: FarmTopBarProps) {
       </div>
 
       <div className="flex items-center gap-3">
+        {produce && produce.length > 0 && (
+          <div className="flex items-center gap-2 rounded-full bg-white/40 px-3 py-1 text-sm dark:bg-black/30">
+            {produce.map(({ definition, quantity }) => (
+              <span key={definition.name} title={`${quantity} ${definition.name}`} className="tabular-nums">
+                {definition.emoji} {quantity}
+              </span>
+            ))}
+          </div>
+        )}
+
         <Button asChild variant="ghost" size="sm">
           <Link to={ITEM_REGISTRY_ROUTE}>
             <Package className="mr-2 h-4 w-4" />

@@ -34,6 +34,26 @@ export {
   // Event construction and querying.
   buildGameItemDefinitionEvent,
   buildGameItemDefinitionFilter,
+
+  // kind:31633 inventories. The Farm writes exactly one context, `farm:main`.
+  KIND_GAME_INVENTORY,
+  buildGameInventoryAddress,
+  parseGameInventoryAddress,
+  parseGameInventory,
+  parseGameInventoryResult,
+  validateGameInventory,
+  buildGameInventoryEvent,
+  buildGameInventoryFilter,
+  // The safe rewrite path: kind:31633 is replaceable, so anything the builder
+  // does not regenerate and the caller does not preserve is destroyed for every
+  // other client too.
+  toBuildGameInventoryInput,
+  addInventoryItemQuantity,
+  setInventoryItemQuantity,
+  getInventoryItemQuantity,
+  getInventoryItems,
+  compareGameInventoryRevisions,
+  INVENTORY_REVISION_TAG,
 } from '@nostr-games/inventory';
 
 export type {
@@ -50,6 +70,16 @@ export type {
   ItemDefinitionValidationIssue,
   UnsignedEventTemplate,
   ParseWarning,
+
+  GameInventory,
+  GameInventoryItem,
+  GameInventoryAddress,
+  GameInventoryFilter,
+  BuildGameInventoryInput,
+  BuildGameInventoryItemInput,
+  GameInventoryRevisionStatus,
+  GameInventoryRevisionCandidate,
+  InventoryValidationResult,
 } from '@nostr-games/inventory';
 
 /** Kinds defined by the inventory protocol. */
@@ -76,6 +106,7 @@ export interface InventoryPackageStatus {
 export function inventoryPackageStatus(): InventoryPackageStatus {
   return {
     installed: true,
-    reason: '@nostr-games/inventory provides kind:31632 for the Item Registry. Kind 31633 is not wired up yet.',
+    reason:
+      '@nostr-games/inventory provides kind:31632 for the Item Registry and kind:31633 for the farm:main produce inventory.',
   };
 }

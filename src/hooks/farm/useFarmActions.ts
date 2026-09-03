@@ -1,4 +1,6 @@
+import { useCallback, useRef } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useNostr } from '@nostrify/react';
 
 import { CROP_CATALOG } from '@/farm/crops/catalog';
 import { applyFarmAction } from '@/farm/slots/transitions';
@@ -7,14 +9,22 @@ import type { FarmSlot } from '@/farm/slots/types';
 import type { HarvestResult } from '@/farm/harvest/types';
 import { systemClock } from '@/farm/time';
 import { buildSlotState } from '@/nostr/slot-state';
-import { slotKey, type FarmSlots } from './useFarmSlots';
+import { DEFAULT_GAME_RELAY } from '@/nostr/relays';
+import { creditHarvest, reconcileCredit, type CreditDeps, type CreditResult } from '@/inventory/credit-harvest';
+import { FARM_INVENTORY_D, selectNewestInventory } from '@/inventory/farm-inventory';
+import { getProduceForCrop, type ProduceDefinition } from '@/inventory/produce-catalog';
+import { withSerializedWrite } from '@/lib/write-lock';
+import { slotKey, type FarmSlotRecord, type FarmSlots } from './useFarmSlots';
+import { readFarmInventory, publishFarmInventory } from './inventory-relays';
+import { farmInventoryQueryKey, setFarmInventory } from './useFarmInventory';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
 import { useToast } from '@/hooks/useToast';
 
 export interface FarmActionInput {
   mapId: string;
-  slot: FarmSlot;
+  /** The slot plus the identity of the event it came from. */
+  record: FarmSlotRecord;
   type: FarmActionType;
   cropId?: string;
 }
@@ -23,6 +33,19 @@ export class FarmActionRejectedError extends Error {
   constructor(readonly reason: string) {
     super(reason);
     this.name = 'FarmActionRejectedError';
+  }
+}
+
+/** A harvest that could not be completed, with the phase it stopped in. */
+export class HarvestFailedError extends Error {
+  constructor(
+    message: string,
+    readonly phase: 'inventory' | 'slot',
+    /** True when the outcome is unknown rather than a definite failure. */
+    readonly ambiguous: boolean
+  ) {
+    super(message);
+    this.name = 'HarvestFailedError';
   }
 }
 
@@ -40,46 +63,126 @@ const MESSAGES: Record<string, string> = {
 /**
  * Perform a farm action.
  *
- * The flow is deliberately: **validate locally with the pure domain, then
- * publish the resulting state**. The player is the authority for their own
- * farm, so there is no intent event, no host election and no processor to poll.
+ * Actions that only change world state (plant, water, clear) keep the
+ * optimistic path: they are idempotent replaceable writes, so republishing one
+ * twice is the same state.
  *
- * A future visitor flow slots in at exactly this point: a visitor publishes an
- * intent event, the owner's client checks permission, and then runs this same
- * `applyFarmAction` and publishes the same resulting `SlotState`. Nothing in
- * `src/farm` has to change for that.
+ * HARVEST IS DIFFERENT, because it also credits an item, and `+1` applied twice
+ * is `+2`. It therefore runs credit-first and clears nothing optimistically:
+ *
+ *   guard → resolve produce → credit farm:main → only then publish the empty slot
+ *
+ * A crop that lingers after the item arrives is recoverable — the next attempt
+ * finds the harvest already credited and only retries the slot clear. A crop
+ * that vanishes without an item is not recoverable, which is why the ordering
+ * is not the other way round.
  */
 export function useFarmActions() {
   const { user } = useCurrentUser();
+  const { nostr } = useNostr();
   const { mutateAsync: publishEvent } = useNostrPublish();
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
-  const mutation = useMutation<{ slot: FarmSlot; harvest?: HarvestResult }, Error, FarmActionInput>({
-    mutationFn: async ({ mapId, slot, type, cropId }) => {
+  /**
+   * Slots with an action in flight, checked synchronously.
+   *
+   * React state is not a mutex: two clicks in the same tick both observe the
+   * pre-render `isPending === false`. This closes that window before any
+   * network call happens.
+   */
+  const inFlight = useRef(new Set<string>());
+
+  const creditDeps = useCallback((): CreditDeps => {
+    if (!user) throw new Error('Sign in to work your farm.');
+    return {
+      ownerPubkey: user.pubkey,
+      readInventory: readFarmInventory(nostr, user.pubkey),
+      signEvent: (template) => user.signer.signEvent(template),
+      publish: publishFarmInventory(nostr),
+      nowSec: () => systemClock.now(),
+    };
+  }, [nostr, user]);
+
+  const mutation = useMutation<{ slot: FarmSlot; harvest?: HarvestResult; produce?: ProduceDefinition }, Error, FarmActionInput>({
+    mutationFn: async ({ mapId, record, type, cropId }) => {
       if (!user) throw new Error('Sign in to work your farm.');
 
-      const result = applyFarmAction(slot, { type, nowSec: systemClock.now(), cropId }, CROP_CATALOG);
+      // Computed ONCE per action. The optimistic path reuses this result rather
+      // than re-running the transition against a second, later clock reading.
+      const result = applyFarmAction(record.slot, { type, nowSec: systemClock.now(), cropId }, CROP_CATALOG);
       if (!result.ok) throw new FarmActionRejectedError(result.reason);
 
-      await publishEvent(buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: result.slot }));
-      return { slot: result.slot, harvest: result.harvest };
+      if (type !== 'harvest' || !result.harvest) {
+        await publishEvent(buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: result.slot }));
+        return { slot: result.slot, harvest: result.harvest };
+      }
+
+      const produce = getProduceForCrop(result.harvest.cropId);
+      if (!produce) {
+        // Fail before any network mutation: a crop with no item must never be
+        // cleared, because it could never be credited.
+        throw new HarvestFailedError(
+          `"${result.harvest.cropId}" has no official produce definition yet, so it cannot be harvested.`,
+          'inventory',
+          false
+        );
+      }
+
+      if (!record.sourceEventId) {
+        throw new HarvestFailedError(
+          'This crop has not been confirmed on a relay yet. Refresh and try again.',
+          'inventory',
+          false
+        );
+      }
+
+      const credit = await runCredit(creditDeps(), record.sourceEventId, produce);
+
+      if (credit.status === 'rejected') throw new HarvestFailedError(credit.error, 'inventory', false);
+      if (credit.status === 'ambiguous') {
+        throw new HarvestFailedError(
+          'Your produce may or may not have been credited, so the crop was left in place. Try again — it will not be counted twice.',
+          'inventory',
+          true
+        );
+      }
+
+      if (credit.status === 'accepted') {
+        // Show the new balance at once, parsed back from the very event we
+        // signed, rather than waiting for a relay to serve it back.
+        setFarmInventory(queryClient, user.pubkey, selectNewestInventory([credit.event], user.pubkey));
+      }
+
+      // Only now is it safe to remove the crop.
+      try {
+        await publishEvent(buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: result.slot }));
+      } catch (error) {
+        throw new HarvestFailedError(
+          `Your ${produce.name} was added, but clearing the crop failed. Harvest it again to finish — it will not be counted twice. (${error instanceof Error ? error.message : String(error)})`,
+          'slot',
+          false
+        );
+      }
+
+      return { slot: result.slot, harvest: result.harvest, produce };
     },
 
-    onMutate: async ({ mapId, slot, type, cropId }) => {
+    onMutate: async ({ mapId, record, type, cropId }) => {
       if (!user) return;
       const key = ['farm-slots', user.pubkey, mapId];
-      await queryClient.cancelQueries({ queryKey: key });
 
-      // Optimistic update: run the same transition and patch the cache, so the
-      // grid reacts instantly and still shows exactly what will be published.
-      const result = applyFarmAction(slot, { type, nowSec: systemClock.now(), cropId }, CROP_CATALOG);
-      if (!result.ok) return;
+      // Harvest clears nothing up front — the crop stays until the item exists.
+      if (type === 'harvest') return { key };
+
+      await queryClient.cancelQueries({ queryKey: key });
+      const result = applyFarmAction(record.slot, { type, nowSec: systemClock.now(), cropId }, CROP_CATALOG);
+      if (!result.ok) return { key };
 
       const previous = queryClient.getQueryData<FarmSlots>(key);
       if (previous) {
         const byAddress = new Map(previous.byAddress);
-        byAddress.set(slotKey(mapId, slot.coord.x, slot.coord.y), result.slot);
+        byAddress.set(slotKey(mapId, record.slot.coord.x, record.slot.coord.y), { slot: result.slot });
         queryClient.setQueryData<FarmSlots>(key, { byAddress });
       }
       return { previous, key };
@@ -91,19 +194,70 @@ export function useFarmActions() {
 
       toast({
         variant: 'destructive',
-        title: 'Action failed',
-        description: error instanceof FarmActionRejectedError ? (MESSAGES[error.reason] ?? error.reason) : error.message,
+        title: error instanceof HarvestFailedError && error.phase === 'slot' ? 'Crop not cleared' : 'Action failed',
+        description:
+          error instanceof FarmActionRejectedError ? (MESSAGES[error.reason] ?? error.reason) : error.message,
       });
     },
 
-    onSuccess: (_data, { mapId }) => {
+    onSuccess: (data, { mapId }) => {
       if (!user) return;
       queryClient.invalidateQueries({ queryKey: ['farm-slots', user.pubkey, mapId] });
+
+      if (data.produce) {
+        queryClient.invalidateQueries({ queryKey: farmInventoryQueryKey(user.pubkey) });
+        toast({ title: `+1 ${data.produce.name}`, description: 'Added to your farm produce.' });
+      }
+    },
+
+    onSettled: (_data, _error, { mapId, record }) => {
+      inFlight.current.delete(guardKey(mapId, record));
     },
   });
 
-  return {
-    act: mutation.mutateAsync,
-    isActing: mutation.isPending,
-  };
+  /** Reject a duplicate action on the same slot before it can reach the network. */
+  const act = useCallback(
+    async (input: FarmActionInput) => {
+      const key = guardKey(input.mapId, input.record);
+      if (inFlight.current.has(key)) return undefined;
+      inFlight.current.add(key);
+      try {
+        return await mutation.mutateAsync(input);
+      } finally {
+        inFlight.current.delete(key);
+      }
+    },
+    [mutation]
+  );
+
+  return { act, isActing: mutation.isPending };
+}
+
+function guardKey(mapId: string, record: FarmSlotRecord): string {
+  return `${mapId}:${record.slot.coord.x}:${record.slot.coord.y}`;
+}
+
+/**
+ * Run the credit inside the shared write lock, then reconcile an ambiguous
+ * outcome once before reporting it.
+ */
+async function runCredit(
+  deps: CreditDeps,
+  consumedEventId: string,
+  produce: ProduceDefinition
+): Promise<CreditResult> {
+  const request = { produce, consumedEventId, consumedEventRelay: DEFAULT_GAME_RELAY };
+
+  return withSerializedWrite(`nostr-worlds:inventory:${deps.ownerPubkey}:${FARM_INVENTORY_D}`, async () => {
+    const result = await creditHarvest(deps, request);
+    if (result.status !== 'ambiguous') return result;
+
+    // "Unknown" is not failure. Look for the marker before telling the user
+    // anything, and never publish a second `+1` to find out.
+    const check = await reconcileCredit(deps, request);
+    if (check.credited) {
+      return { status: 'already-applied', inventory: check.inventory!, quantity: check.quantity };
+    }
+    return result;
+  });
 }
