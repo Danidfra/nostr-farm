@@ -11,20 +11,22 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          
-      - name: Clean install dependencies
-        run: |
-          rm -rf node_modules package-lock.json
-          npm install
-          
+          cache: npm
+
+      # `npm ci` installs exactly what package-lock.json pins. Reinstalling
+      # from package.json alone let CI test dependency versions no developer
+      # had run locally.
+      - name: Install dependencies
+        run: npm ci
+
       - name: Run tests
         run: npm run test
