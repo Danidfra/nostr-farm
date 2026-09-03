@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import './lib/polyfills.ts';
 
 import '@fontsource-variable/inter';
+import '@fontsource-variable/fraunces';
 
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { applyStoredTheme } from '@/lib/theme';

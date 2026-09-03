@@ -59,7 +59,7 @@ export default function FarmPage() {
   );
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-gradient-to-b from-sky-300 to-green-200 dark:from-sky-900 dark:to-green-950">
+    <div className="farm-meadow flex h-screen w-screen flex-col overflow-hidden">
       <FarmTopBar
         farmName={farm.data?.world.name}
         renderpack={farm.data?.world.renderpack}
