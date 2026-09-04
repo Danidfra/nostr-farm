@@ -1,12 +1,13 @@
 # Developer tools
 
-Three routes, all gated by a **build-time literal**.
+Three routes and one panel on the field, all gated by a **build-time literal**.
 
-| Route | Purpose |
+| Where | Purpose |
 | --- | --- |
 | `/dev` | simulation-only test lab |
 | `/dev/worlds` | world/map editor foundation |
 | `/dev/inventory` | read-only `farm:main` accounting panel |
+| the farm page | live field tools for one authorized key (see below) |
 
 ## Gating
 
@@ -22,9 +23,67 @@ not merely unreachable.
 | `VITE_ENABLE_DEV_TOOLS=true npm run build` | on |
 
 `npm run build` ends with `scripts/check-dev-chunks.mjs`, which fails the
-build if a `TestLabPage`, `WorldEditorPage`, `InventoryPanelPage` or
-`DevLayout` chunk is present in `dist/assets` (unless the build opted in with
-`VITE_ENABLE_DEV_TOOLS=true`). `npm test` therefore covers the exclusion.
+build if a `TestLabPage`, `WorldEditorPage`, `InventoryPanelPage`,
+`DevLayout` or `DevFarmTools` chunk is present in `dist/assets` (unless the
+build opted in with `VITE_ENABLE_DEV_TOOLS=true`). `npm test` therefore
+covers the exclusion. The flag is resolved by `resolveDevToolsEnabled` in
+`scripts/deploy-target.mjs`, and only the literal string `true` counts.
+
+## Field tools — live, one authorized key
+
+`src/dev/farm-tools/`. A small panel in the corner of the farm page whose
+one action, **Make harvestable**, lets the real Farm → `farm:main` → other
+game flow be exercised in seconds instead of waiting out crop timers.
+
+**Purpose.** Interoperability testing against the live deployment, with the
+real signed-in identity, the real farm state and the real events. It is not
+a gameplay feature and is not mentioned to players.
+
+**Who sees it.** The panel renders, and the hook behind it agrees to sign,
+only when both hold:
+
+1. the build opted in (`__DEV_TOOLS_ENABLED__` is `true`), and
+2. the signed-in hex public key equals `DEV_FARM_TOOLS_PUBKEY` in
+   `src/dev/farm-tools/access.ts`, which is the official Farm issuer key
+   (`FARM_OFFICIAL_ISSUER_PUBKEY`). The comparison is on the normalized hex
+   key; an npub is only its display form.
+
+Anyone else, and anyone logged out, gets no panel and no control. A default
+production build contains neither the panel nor its chunk.
+
+**What it does.** For the selected planted slot it publishes one ordinary
+kind:31417 replacement — the same `buildSlotState` + `useNostrPublish` write
+that plant and water use — carrying the state the crop would have had after
+growing to its harvest stage plus one normal watering
+(`acceleratedToReady`). Nothing else is written: no inventory, no item, no
+quantity. The crop is then harvested with the **normal** click on the field,
+and that harvest runs the production pipeline unchanged: guard → produce
+lookup → `creditHarvest` (confirmed read, idempotency marker, spend
+settlement, kind:31633) → clear the slot. The idempotency marker is the id of
+the accelerated plant event, so a second harvest of the same crop credits
+nothing. Consuming games see an ordinary Farm Strawberry and nothing more.
+
+What it deliberately does not do: grant produce, edit `farm:main`, change
+crop timings or definitions, or publish anything when the panel is merely
+opened. Every publish is one explicit click, signed by the current signer.
+Rotten crops are refused; clear them on the field.
+
+**Enable for a test deployment** (Vercel): set the environment variable
+`VITE_ENABLE_DEV_TOOLS=true` on the project and redeploy. The build log will
+say `[check-dev-chunks] dev tools enabled for this build; skipping`. Sign in
+with the authorized key and the panel appears on the farm page.
+
+**Disable afterwards:** remove the variable and redeploy. The build log goes
+back to `[check-dev-chunks] ok: no developer chunk …`, and the panel's chunk
+is absent from `dist/assets`.
+
+**Not a security boundary.** The gate is client-side and only decides
+whether a convenience renders. Everything it can publish is an owner-signed
+event the same user could publish by hand; nothing server-side trusts the
+check, and it must never be described as authorization. What it does
+guarantee: no private key or secret in source, explicit build-time
+enablement that defaults to off, and a public-key check before anything is
+signed.
 
 ## `/dev` — test lab (simulation only)
 
@@ -49,9 +108,9 @@ Controls:
 
 ### Live / Nostr area
 
-Not built. The page carries a clearly marked, visually distinct placeholder.
-When live tools arrive, each control must state exactly which event it signs and
-publishes before it does anything.
+Not built here. The page carries a clearly marked, visually distinct
+placeholder. The one live tool that exists lives on the farm page itself
+(see "Field tools" above) and states which event it publishes.
 
 ## `/dev/inventory` — farm:main accounting (read only)
 
