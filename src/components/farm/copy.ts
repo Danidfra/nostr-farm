@@ -22,7 +22,7 @@ export const ACTION_REJECTION_MESSAGES: Record<string, string> = {
 export const APP_NAME = 'Nostr Farm';
 
 export const WELCOME = {
-  eyebrow: 'A cozy farming game on Nostr',
+  eyebrow: 'Welcome',
   title: 'Grow a little farm that is truly yours.',
   description:
     'Plant, water and harvest. Your farm is saved to your Nostr identity, so it is yours on any device, and other Nostr games can use what you grow.',
