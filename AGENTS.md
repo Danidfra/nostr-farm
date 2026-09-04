@@ -35,6 +35,8 @@ test to relax.
 | an event tag or parser | `src/nostr/` |
 | a relay query or mutation | `src/hooks/farm/` |
 | a developer-only tool | `src/dev/` (gated, see `docs/dev-tools.md`) |
+| a reusable piece of game chrome | `src/components/game/`, see `docs/ui.md` |
+| words a player reads | `src/components/farm/copy.ts` |
 | kind:31632 item logic | `src/inventory/registry/`, see `docs/item-registry.md` |
 | farm:main inventory, spends, folds | `src/inventory/`, see `docs/farm-inventory.md` |
 
@@ -64,13 +66,19 @@ no election, and no processor. See [`docs/state-model.md`](docs/state-model.md).
 npm test    # typecheck + lint + vitest + production build
 ```
 
-Run it before claiming anything works. `npm run build` must not emit a
-`TestLabPage`, `WorldEditorPage` or `DevLayout` chunk.
+Run it before claiming anything works. `npm run build` fails on its own if a
+`TestLabPage`, `WorldEditorPage`, `InventoryPanelPage` or `DevLayout` chunk is
+emitted (`scripts/check-dev-chunks.mjs`).
 
 ## Conventions
 
 - shadcn/ui components live in `src/components/ui/`; add with
   `npx shadcn@latest add <component>`. Unused ones are deleted, not kept.
+- Colours come from the theme tokens (`index.css`, `tailwind.config.ts`), never
+  raw hex or Tailwind palette classes in components. Fraunces (`font-display`)
+  is for names, titles and counts only.
+- The HUD shows no relay, kind or artwork version; that belongs in the About
+  dialog or under `/dev`.
 - `@/` is the alias for `src/`.
 - Domain functions take `nowSec` explicitly and return new values; nothing in
   `src/farm` mutates its arguments.

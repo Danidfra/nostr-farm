@@ -9,10 +9,11 @@ src/
   farm/        pure domain      no React, no Nostr, no clock, no browser
   world/       definitions, pinned renderpacks, render geometry
   nostr/       event schemas for world / map / slot state
-  inventory/   kind:31632 registry, farm:main kind:31633 credit, spend-aware reads
-  hooks/       React glue: queries, mutations, clock
-  components/  UI
-  dev/         build-flag gated developer tools
+  inventory/   kind:31632 registry, farm:main kind:31633 credit, spend-aware reads,
+               produce change attribution (presentation over the resolved view)
+  hooks/       React glue: queries, mutations, clock, the live inventory tail
+  components/  UI: farm/ (field, HUD, gate, copy), game/ (a few primitives), items/, ui/
+  dev/         build-flag gated developer tools (/dev, /dev/worlds, /dev/inventory)
 ```
 
 ## The one rule that matters
@@ -32,7 +33,7 @@ relying on discipline.
 | `world/` | map geometry, renderpack pinning | contain gameplay rules |
 | `nostr/` | tag schemas, parsing, authority checks | contain gameplay rules |
 | `hooks/` | queries, mutations, optimistic updates | re-implement domain rules |
-| `components/` | rendering and input | compute growth itself |
+| `components/` | rendering and input | compute growth itself, or derive a balance |
 
 Every gameplay decision — can this be watered, is it ripe, has it rotted — is a
 call into `src/farm`. The UI and the Nostr layer only move values around.
@@ -73,7 +74,21 @@ with an authoritative fetch, and settles those spends in a kind:1417 manifest
 only when it is already replacing the snapshot. Unresolved settlement history
 is shown as unavailable, never guessed. Protocol rules live in
 `@nostr-games/inventory`; the Farm's integration is described in
-[farm-inventory.md](./farm-inventory.md).
+[farm-inventory.md](./farm-inventory.md), and the cross-game flow in
+[interoperability.md](./interoperability.md).
+
+The read model (`FarmInventoryView`) keeps the resolution it derived the
+balance from. Two consumers read it rather than re-deriving anything: the
+`/dev/inventory` panel, and `diffProduceViews`, which attributes a change in
+the displayed counts to a harvest, an external spend, or neither, so the HUD
+can say why a number moved. Both are presentation; neither is accounting.
+
+## Presentation
+
+The chrome is the shadcn component set re-themed through its own CSS
+variables, plus a handful of game primitives (`src/components/game`). See
+[ui.md](./ui.md). Player-facing copy lives in `src/components/farm/copy.ts`
+so protocol vocabulary stays out of the game.
 
 ## What is deliberately absent
 
