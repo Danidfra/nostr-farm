@@ -21,7 +21,7 @@ import { farmInventoryQueryKey, setFarmInventory } from './useFarmInventory';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
 import { useToast } from '@/hooks/useToast';
-import { ACTION_REJECTION_MESSAGES } from '@/components/farm/copy';
+import { ACTION_REJECTION_MESSAGES, HARVEST_TOAST } from '@/components/farm/copy';
 
 export interface FarmActionInput {
   mapId: string;
@@ -202,7 +202,7 @@ export function useFarmActions() {
 
       if (data.produce) {
         queryClient.invalidateQueries({ queryKey: farmInventoryQueryKey(user.pubkey) });
-        toast({ title: `+1 ${data.produce.name}`, description: 'Added to your farm produce.' });
+        toast({ variant: 'harvest', title: `+1 ${data.produce.emoji} ${data.produce.name}`, description: HARVEST_TOAST.description });
       }
     },
 

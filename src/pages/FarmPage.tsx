@@ -1,12 +1,14 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSeoMeta } from '@unhead/react';
 
 import type { FarmSlot } from '@/farm/slots/types';
 import type { FarmActionType } from '@/farm/slots/actions';
 import { RenderpackLoadError } from '@/world/renderpack/types';
 import { CreateFarmPanel, FarmErrorPanel, LoadingFieldPanel, WelcomePanel } from '@/components/farm/FarmGate';
-import { ERRORS } from '@/components/farm/copy';
-import { FarmField } from '@/components/farm/FarmField';
+import { CLEAR_ROTTEN, ERRORS } from '@/components/farm/copy';
+import { FarmField, type FieldBurst } from '@/components/farm/FarmField';
+import { GameDialog } from '@/components/game/GameDialog';
+import { Button } from '@/components/ui/button';
 import { FarmHud } from '@/components/farm/FarmHud';
 import { SeedPicker } from '@/components/farm/SeedPicker';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
@@ -39,6 +41,16 @@ export default function FarmPage() {
   const inventory = useFarmInventory(user?.pubkey);
 
   const [seedTarget, setSeedTarget] = useState<FarmSlot | null>(null);
+  const [clearTarget, setClearTarget] = useState<FarmSlot | null>(null);
+
+  // Harvest feedback on the field. A burst is added only after the mutation
+  // resolved with produce, i.e. after the inventory credit was accepted.
+  const [bursts, setBursts] = useState<FieldBurst[]>([]);
+  const burstTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
+  useEffect(() => {
+    const timers = burstTimers.current;
+    return () => timers.forEach(clearTimeout);
+  }, []);
 
   const mapId = farm.data?.map.id;
 
@@ -48,14 +60,38 @@ export default function FarmPage() {
   );
 
   const runAction = useCallback(
-    (slot: FarmSlot, type: FarmActionType, cropId?: string) => {
+    async (slot: FarmSlot, type: FarmActionType, cropId?: string) => {
       if (!mapId) return;
       // The record carries the source event id, which harvest needs as its
       // idempotency key.
       const record = readSlotRecord(slots.data, mapId, slot.coord.x, slot.coord.y);
-      void act({ mapId, record, type, cropId });
+      const result = await act({ mapId, record, type, cropId }).catch(() => undefined);
+
+      if (result?.produce) {
+        const burst: FieldBurst = {
+          id: `${Date.now()}-${slot.coord.x}-${slot.coord.y}`,
+          coord: slot.coord,
+          label: `+1 ${result.produce.emoji} ${result.produce.name}`,
+        };
+        setBursts((current) => [...current, burst]);
+        const timer = setTimeout(() => {
+          burstTimers.current.delete(timer);
+          setBursts((current) => current.filter((entry) => entry.id !== burst.id));
+        }, 1400);
+        burstTimers.current.add(timer);
+      }
     },
     [act, mapId, slots.data]
+  );
+
+  // Clearing a rotten crop is the one irreversible click on the field, so it
+  // asks first. The clear itself is the same action as before.
+  const requestAction = useCallback(
+    (slot: FarmSlot, type: FarmActionType) => {
+      if (type === 'clear') setClearTarget(slot);
+      else void runAction(slot, type);
+    },
+    [runAction]
   );
 
   return (
@@ -79,7 +115,7 @@ export default function FarmPage() {
         produceLoading={inventory.isPending}
       />
 
-      <main className="relative flex-1 overflow-hidden">
+      <main className="relative flex-1 overflow-hidden p-3 sm:p-4">
         {!user && <WelcomePanel />}
 
         {user && farm.isLoading && <LoadingFieldPanel />}
@@ -115,8 +151,9 @@ export default function FarmPage() {
             readSlot={read}
             nowSec={nowSec}
             busy={isActing}
-            onSlotAction={(slot, action) => runAction(slot, action)}
+            onSlotAction={requestAction}
             onPlantRequest={setSeedTarget}
+            bursts={bursts}
           />
         )}
 
@@ -125,9 +162,33 @@ export default function FarmPage() {
             isOpen
             renderpack={renderpack.data}
             onClose={() => setSeedTarget(null)}
-            onSelect={(cropId) => runAction(seedTarget, 'plant', cropId)}
+            onSelect={(cropId) => void runAction(seedTarget, 'plant', cropId)}
           />
         )}
+
+        <GameDialog
+          open={clearTarget !== null}
+          onOpenChange={(open) => !open && setClearTarget(null)}
+          title={CLEAR_ROTTEN.title}
+          description={CLEAR_ROTTEN.description}
+          footer={
+            <>
+              <Button variant="outline" onClick={() => setClearTarget(null)}>
+                {CLEAR_ROTTEN.cancel}
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={() => {
+                  const target = clearTarget;
+                  setClearTarget(null);
+                  if (target) void runAction(target, 'clear');
+                }}
+              >
+                {CLEAR_ROTTEN.confirm}
+              </Button>
+            </>
+          }
+        />
       </main>
     </div>
   );

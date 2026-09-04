@@ -79,3 +79,14 @@ export const HUD = {
   copied: 'Copied your public key',
   copyFailed: 'Could not copy',
 } as const;
+
+export const CLEAR_ROTTEN = {
+  title: 'Clear this rotten crop?',
+  description: 'The plot goes back to bare soil. There is nothing left to harvest from it.',
+  cancel: 'Keep it',
+  confirm: 'Clear the plot',
+} as const;
+
+export const HARVEST_TOAST = {
+  description: 'Added to your basket.',
+} as const;
