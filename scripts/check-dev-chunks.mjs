@@ -6,7 +6,7 @@
 // skipped here.
 import { readdirSync } from 'node:fs';
 
-const DEV_CHUNKS = ['TestLabPage', 'WorldEditorPage', 'InventoryPanelPage', 'DevLayout'];
+const DEV_CHUNKS = ['TestLabPage', 'WorldEditorPage', 'InventoryPanelPage', 'DevLayout', 'DevFarmTools'];
 
 if (process.env.VITE_ENABLE_DEV_TOOLS === 'true') {
   console.log('[check-dev-chunks] dev tools enabled for this build; skipping');

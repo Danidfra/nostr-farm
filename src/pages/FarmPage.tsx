@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useSeoMeta } from '@unhead/react';
 
 import type { FarmSlot } from '@/farm/slots/types';
@@ -21,6 +21,12 @@ import { useFarmInventory } from '@/hooks/farm/useFarmInventory';
 import { useProduceChanges } from '@/hooks/farm/useProduceChanges';
 import { ProduceChangeChips } from '@/components/farm/ProduceChangeChips';
 import { useRenderpack } from '@/hooks/farm/useRenderpack';
+import { DEV_TOOLS_ENABLED } from '@/dev/enabled';
+import { useDevFarmToolsAccess } from '@/dev/farm-tools/access';
+
+// Behind the same build-time literal as the /dev routes, so a production build
+// without dev tools emits no chunk for the field tools at all.
+const DevFarmTools = DEV_TOOLS_ENABLED ? lazy(() => import('@/dev/farm-tools/DevFarmTools')) : null;
 
 /**
  * The V1 vertical slice: enter farm -> see the field -> plant -> water ->
@@ -42,6 +48,7 @@ export default function FarmPage() {
   const { act, isActing } = useFarmActions();
   const inventory = useFarmInventory(user?.pubkey);
   const produceChanges = useProduceChanges(inventory.data);
+  const devToolsAllowed = useDevFarmToolsAccess();
 
   const [seedTarget, setSeedTarget] = useState<FarmSlot | null>(null);
   const [clearTarget, setClearTarget] = useState<FarmSlot | null>(null);
@@ -161,6 +168,12 @@ export default function FarmPage() {
         )}
 
         {user && farm.data && <ProduceChangeChips notices={produceChanges} renderpack={renderpack.data} />}
+
+        {DevFarmTools && devToolsAllowed && mapId && (
+          <Suspense fallback={null}>
+            <DevFarmTools mapId={mapId} slots={slots.data} nowSec={nowSec} />
+          </Suspense>
+        )}
 
         {user && farm.data && renderpack.data && seedTarget && (
           <SeedPicker
