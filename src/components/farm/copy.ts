@@ -58,3 +58,24 @@ export const ERRORS = {
   retry: 'Try again',
   detailsTitle: 'Details',
 } as const;
+
+export const HUD = {
+  tagline: 'A cozy farming game on Nostr',
+  trayLabel: 'Your produce',
+  loading: 'Checking your basket…',
+  empty: 'Basket empty',
+  emptyHint: 'Harvest a crop to fill it.',
+  unresolved: 'Produce unavailable',
+  unresolvedHint: 'Your produce records could not be verified right now, so no balance is shown. This usually clears on its own.',
+  menuLabel: 'player menu',
+  switchAccount: 'Switch account',
+  addAccount: 'Add another account',
+  itemRegistry: 'Item Registry',
+  appearance: 'Appearance',
+  about: 'About this farm',
+  aboutDescription: 'The technical facts behind your field.',
+  logOut: 'Log out',
+  copyKey: 'Copy your public key',
+  copied: 'Copied your public key',
+  copyFailed: 'Could not copy',
+} as const;

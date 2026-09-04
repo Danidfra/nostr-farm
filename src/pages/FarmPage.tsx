@@ -7,7 +7,7 @@ import { RenderpackLoadError } from '@/world/renderpack/types';
 import { CreateFarmPanel, FarmErrorPanel, LoadingFieldPanel, WelcomePanel } from '@/components/farm/FarmGate';
 import { ERRORS } from '@/components/farm/copy';
 import { FarmField } from '@/components/farm/FarmField';
-import { FarmTopBar } from '@/components/farm/FarmTopBar';
+import { FarmHud } from '@/components/farm/FarmHud';
 import { SeedPicker } from '@/components/farm/SeedPicker';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNowSeconds } from '@/hooks/useClock';
@@ -60,11 +60,23 @@ export default function FarmPage() {
 
   return (
     <div className="farm-meadow flex h-screen w-screen flex-col overflow-hidden">
-      <FarmTopBar
+      <FarmHud
         farmName={farm.data?.world.name}
-        renderpack={farm.data?.world.renderpack}
+        renderpack={renderpack.data}
+        about={
+          farm.data
+            ? {
+                farmName: farm.data.world.name,
+                mapName: farm.data.definition.name,
+                mapDefinitionId: farm.data.definition.id,
+                mapRevision: farm.data.definition.revision,
+                renderpack: farm.data.world.renderpack,
+              }
+            : undefined
+        }
         produce={inventory.data?.produce}
         produceStatus={inventory.data?.status}
+        produceLoading={inventory.isPending}
       />
 
       <main className="relative flex-1 overflow-hidden">
