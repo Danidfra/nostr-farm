@@ -64,3 +64,21 @@ export function findAssetRefsOutsideBase(html, base) {
   }
   return offending;
 }
+
+export const DEV_TOOLS_ENV = 'VITE_ENABLE_DEV_TOOLS';
+
+/**
+ * Whether a build ships the developer tools.
+ *
+ * On for the dev server, off for every production build unless the build
+ * opts in with `VITE_ENABLE_DEV_TOOLS=true` — the literal string, nothing
+ * looser. Vite inlines the answer as `__DEV_TOOLS_ENABLED__`, so a build that
+ * says "off" drops the dev routes, the field tools and their chunks entirely.
+ *
+ * @param {Record<string, string | undefined>} env
+ * @param {string} mode Vite's mode: `development` for `vite`, `production` for `vite build`
+ * @returns {boolean}
+ */
+export function resolveDevToolsEnabled(env, mode) {
+  return mode === 'development' || env[DEV_TOOLS_ENV] === 'true';
+}

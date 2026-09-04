@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react-swc';
 import { loadEnv } from 'vite';
 import { defineConfig } from 'vitest/config';
 
-import { resolveDeployTarget } from './scripts/deploy-target.mjs';
+import { resolveDeployTarget, resolveDevToolsEnabled } from './scripts/deploy-target.mjs';
 
 // https://vitejs.dev/config/
 /**
@@ -26,7 +26,7 @@ export default defineConfig(({ command, mode }) => {
   // Resolved at build time and inlined as a literal, so a production build with
   // dev tools disabled drops the /dev routes *and* their chunks entirely rather
   // than shipping unreachable code.
-  const devToolsEnabled = mode === 'development' || env.VITE_ENABLE_DEV_TOOLS === 'true';
+  const devToolsEnabled = resolveDevToolsEnabled(env, mode);
 
   return {
     base: command === 'build' ? deployTarget.base : '/',

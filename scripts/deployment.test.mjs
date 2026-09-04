@@ -6,6 +6,7 @@ import {
   findAssetRefsOutsideBase,
   OFFICIAL_ORIGIN,
   resolveDeployTarget,
+  resolveDevToolsEnabled,
 } from './deploy-target.mjs';
 
 /**
@@ -35,6 +36,26 @@ describe('deploy targets', () => {
     for (const base of Object.values(DEPLOY_TARGETS)) {
       expect(base).toMatch(/^\/(?:.*\/)?$/);
     }
+  });
+});
+
+describe('resolveDevToolsEnabled', () => {
+  it('keeps developer tools off in a production build by default', () => {
+    // The official Vercel build and the Pages build both run `vite build`
+    // with no flag: neither ships the dev routes or the field tools.
+    expect(resolveDevToolsEnabled({}, 'production')).toBe(false);
+    expect(resolveDevToolsEnabled({ DEPLOY_TARGET: 'github-pages' }, 'production')).toBe(false);
+  });
+
+  it('turns them on only for the literal opt-in', () => {
+    expect(resolveDevToolsEnabled({ VITE_ENABLE_DEV_TOOLS: 'true' }, 'production')).toBe(true);
+    for (const loose of ['1', 'TRUE', 'yes', 'on', '']) {
+      expect(resolveDevToolsEnabled({ VITE_ENABLE_DEV_TOOLS: loose }, 'production'), loose).toBe(false);
+    }
+  });
+
+  it('always has them on for the dev server', () => {
+    expect(resolveDevToolsEnabled({}, 'development')).toBe(true);
   });
 });
 
