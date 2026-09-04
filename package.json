@@ -8,7 +8,8 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "vite build -l error && cp dist/index.html dist/404.html && node scripts/check-dev-chunks.mjs",
+    "build": "vite build -l error && cp dist/index.html dist/404.html && node scripts/check-dev-chunks.mjs && node scripts/check-build-base.mjs",
+    "build:pages": "DEPLOY_TARGET=github-pages npm run build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "eslint",

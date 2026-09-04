@@ -24,8 +24,9 @@ const devRoutes = DEV_TOOLS_ENABLED
 
 export function AppRouter() {
   return (
-    // Routes are written from `/`; the basename places them under the Pages
-    // project path in production and at the root in development.
+    // Routes are written from `/`; the basename places them under whatever
+    // base the build was emitted for (`/` for the official site and in
+    // development, `/nostr-farm/` for the GitHub Pages copy).
     <BrowserRouter basename={import.meta.env.BASE_URL}>
       <Routes>
         <Route path="/" element={<FarmPage />} />

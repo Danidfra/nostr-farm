@@ -40,10 +40,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # `npm run build` already copies index.html to 404.html for the Pages
-      # SPA fallback.
+      # The GitHub Pages target builds for the `/nostr-farm/` project path
+      # (see scripts/deploy-target.mjs). The official deployment at
+      # https://farm.blobbi.pet is built by Vercel with the default target.
+      # The build already copies index.html to 404.html for the Pages SPA
+      # fallback.
       - name: Build
-        run: npm run build
+        run: npm run build:pages
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

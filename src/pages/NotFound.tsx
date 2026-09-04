@@ -5,8 +5,8 @@ import { Button } from '@/components/ui/button';
 
 /**
  * Unknown route. The home link goes through the router so it lands on the
- * farm under whatever basename the app is served from (the GitHub Pages
- * project path in production), rather than the domain root.
+ * farm under whatever basename the app is served from (`/nostr-farm/` on the
+ * GitHub Pages copy), rather than the domain root.
  */
 export default function NotFound() {
   useSeoMeta({

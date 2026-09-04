@@ -7,7 +7,7 @@ produce as inventory that other Nostr games can use. There is no account to
 create with us and no server of ours in the loop: everything you do is a
 signed event on public relays.
 
-**Play it:** <https://danidfra.github.io/nostr-farm/>
+**Play it:** <https://farm.blobbi.pet>
 
 ## Playing
 
@@ -68,14 +68,20 @@ Requires Node 22.
 | Script | Does |
 | --- | --- |
 | `npm run dev` | dev server, dev tools enabled |
-| `npm run build` | production build; fails if a dev-tools chunk leaks in |
+| `npm run build` | production build for the official site; fails if a dev-tools chunk leaks in or an asset path misses the base |
+| `npm run build:pages` | the same build for the GitHub Pages `/nostr-farm/` path |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run lint` | eslint |
 | `npm run test:unit` | vitest |
 | `npm test` | all of the above |
 
-Pushes to `main` deploy to GitHub Pages at the URL above. The build is
-emitted for the `/nostr-farm/` base path; the dev server serves from `/`.
+The official site is <https://farm.blobbi.pet>, deployed by Vercel from `main`
+with `npm run build`, which emits assets for the domain root. Pushes to `main`
+also deploy a GitHub Pages copy at <https://danidfra.github.io/nostr-farm/>,
+built with `npm run build:pages` for the `/nostr-farm/` base path. The base
+path is chosen with `DEPLOY_TARGET` at build time (`scripts/deploy-target.mjs`)
+and nothing in the app knows about it beyond `import.meta.env.BASE_URL`. The
+dev server serves from `/`.
 
 ## How it is built
 
