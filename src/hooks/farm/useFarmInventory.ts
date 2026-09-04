@@ -57,6 +57,13 @@ export interface FarmInventoryView {
   missingFolds: EventReference[];
   /** Everything this view was derived from. Merged monotonically, never replaced. */
   ledger: FarmLedger;
+  /**
+   * The resolution the view was computed from, kept for presentation that
+   * needs more than the counts (the dev inventory panel, change
+   * attribution). `null` when there is no snapshot. Never re-derived by a
+   * consumer: it is the same object `toView` read the balance from.
+   */
+  resolution: FarmInventoryResolution | null;
 }
 
 /**
@@ -154,6 +161,7 @@ export function emptyView(ledger: FarmLedger): FarmInventoryView {
     problems: [],
     missingFolds: [],
     ledger,
+    resolution: null,
   };
 }
 
@@ -177,6 +185,7 @@ export function toView(resolution: FarmInventoryResolution, ledger: FarmLedger):
       problems: resolution.problems.map((problem) => problem.message),
       missingFolds: missingFoldReferences(resolution.snapshot, resolution.chain),
       ledger,
+      resolution,
     };
   }
 
@@ -194,6 +203,7 @@ export function toView(resolution: FarmInventoryResolution, ledger: FarmLedger):
     problems: [],
     missingFolds: [],
     ledger,
+    resolution,
   };
 }
 

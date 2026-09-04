@@ -18,6 +18,8 @@ import { useFarm } from '@/hooks/farm/useFarm';
 import { useFarmActions } from '@/hooks/farm/useFarmActions';
 import { readSlot, readSlotRecord, useFarmSlots } from '@/hooks/farm/useFarmSlots';
 import { useFarmInventory } from '@/hooks/farm/useFarmInventory';
+import { useProduceChanges } from '@/hooks/farm/useProduceChanges';
+import { ProduceChangeChips } from '@/components/farm/ProduceChangeChips';
 import { useRenderpack } from '@/hooks/farm/useRenderpack';
 
 /**
@@ -39,6 +41,7 @@ export default function FarmPage() {
   const renderpack = useRenderpack(farm.data?.world.renderpack);
   const { act, isActing } = useFarmActions();
   const inventory = useFarmInventory(user?.pubkey);
+  const produceChanges = useProduceChanges(inventory.data);
 
   const [seedTarget, setSeedTarget] = useState<FarmSlot | null>(null);
   const [clearTarget, setClearTarget] = useState<FarmSlot | null>(null);
@@ -156,6 +159,8 @@ export default function FarmPage() {
             bursts={bursts}
           />
         )}
+
+        {user && farm.data && <ProduceChangeChips notices={produceChanges} renderpack={renderpack.data} />}
 
         {user && farm.data && renderpack.data && seedTarget && (
           <SeedPicker

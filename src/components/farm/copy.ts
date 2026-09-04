@@ -90,3 +90,11 @@ export const CLEAR_ROTTEN = {
 export const HARVEST_TOAST = {
   description: 'Added to your basket.',
 } as const;
+
+export const PRODUCE_CHANGE = {
+  usedElsewhere: 'Used in another Nostr game',
+  usedIn: (client: string) => `Used in ${client}`,
+  harvested: 'Harvested here',
+  updated: 'Balance updated',
+  updatedElsewhere: 'Balance updated elsewhere',
+} as const;

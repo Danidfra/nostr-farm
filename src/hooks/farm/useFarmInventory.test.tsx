@@ -184,4 +184,18 @@ describe('useFarmInventory', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(result.current.data?.produce).toEqual([]);
   });
+  it('keeps the resolution it derived the balance from on the view', async () => {
+    network.seed(snapshotEvent({ items: { [CARROT.address]: 3 } }));
+    network.seed(spendEvent({ id: S1, item: CARROT.address, quantity: 1 }));
+
+    const { result } = renderHook(() => useFarmInventory(OWNER), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const resolution = result.current.data?.resolution;
+    expect(resolution?.status).toBe('ready');
+    if (resolution?.status !== 'ready') throw new Error('expected a ready resolution');
+    // The same object the counts came from, not a second derivation.
+    expect(resolution.inventory).toBe(result.current.data?.inventory);
+    expect(resolution.state.applied.map((spend) => spend.id)).toEqual([S1]);
+  });
 });
