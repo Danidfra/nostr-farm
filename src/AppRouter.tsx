@@ -1,7 +1,7 @@
 import { lazy, Suspense } from 'react';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 
-import { DEV_ROUTE, DEV_TOOLS_ENABLED, DEV_WORLDS_ROUTE } from '@/dev/enabled';
+import { DEV_INVENTORY_ROUTE, DEV_ROUTE, DEV_TOOLS_ENABLED, DEV_WORLDS_ROUTE } from '@/dev/enabled';
 import { ITEM_REGISTRY_ROUTE } from '@/inventory/routes';
 import FarmPage from './pages/FarmPage';
 import NotFound from './pages/NotFound';
@@ -18,6 +18,7 @@ const devRoutes = DEV_TOOLS_ENABLED
   ? [
       { path: DEV_ROUTE, Component: lazy(() => import('@/dev/test-lab/TestLabPage')) },
       { path: DEV_WORLDS_ROUTE, Component: lazy(() => import('@/dev/world-editor/WorldEditorPage')) },
+      { path: DEV_INVENTORY_ROUTE, Component: lazy(() => import('@/dev/inventory/InventoryPanelPage')) },
     ]
   : [];
 

@@ -1,11 +1,12 @@
 # Developer tools
 
-Two routes, both gated by a **build-time literal**.
+Three routes, all gated by a **build-time literal**.
 
 | Route | Purpose |
 | --- | --- |
 | `/dev` | simulation-only test lab |
 | `/dev/worlds` | world/map editor foundation |
+| `/dev/inventory` | read-only `farm:main` accounting panel |
 
 ## Gating
 
@@ -20,8 +21,10 @@ not merely unreachable.
 | `npm run build` | off; no dev chunk is emitted |
 | `VITE_ENABLE_DEV_TOOLS=true npm run build` | on |
 
-Verify with `ls dist/assets/*.js`: a default production build produces one
-application chunk and no `TestLabPage` / `WorldEditorPage` / `DevLayout` chunk.
+`npm run build` ends with `scripts/check-dev-chunks.mjs`, which fails the
+build if a `TestLabPage`, `WorldEditorPage`, `InventoryPanelPage` or
+`DevLayout` chunk is present in `dist/assets` (unless the build opted in with
+`VITE_ENABLE_DEV_TOOLS=true`). `npm test` therefore covers the exclusion.
 
 ## `/dev` — test lab (simulation only)
 
@@ -49,6 +52,34 @@ Controls:
 Not built. The page carries a clearly marked, visually distinct placeholder.
 When live tools arrive, each control must state exactly which event it signs and
 publishes before it does anything.
+
+## `/dev/inventory` — farm:main accounting (read only)
+
+The player's `farm:main` as the read model sees it. It mounts the **same**
+`useFarmInventory` query the HUD renders, so it shares the cache and the live
+tail with the game; nothing is fetched or resolved a second time, and nothing
+here can publish.
+
+Shown, all read off `FarmInventoryView` and the `resolution` it keeps:
+
+- inventory address, owner, the inventory relays
+- status (`ready` / `unresolved`), resolver problems, missing manifests,
+  resolver warnings, query state (pending / fetching / last update / error),
+  whether the browser is online
+- the snapshot: event id, `created_at`, revision, fold head, contexts,
+  harvest-marker count
+- balances per official produce item: raw (snapshot), pending delta,
+  effective; the effective column is withheld while unresolved
+- every candidate spend with its classification (applied, rejected, folded,
+  voided, ignored, invalid), id, item, quantity, `created_at`, self-declared
+  `client`, and the resolver's note (available → remaining, or why rejected)
+- the fold chain head first, each manifest's `previous`, `spend` and `void`
+  references, and the settled id counts
+- the raw ledger events, expandable as JSON
+
+Not shown, deliberately: per-relay tail state and retry timers. The live
+controller keeps those internal, and the panel says "not exposed" rather than
+reconstructing them.
 
 ## `/dev/worlds` — world editor foundation
 

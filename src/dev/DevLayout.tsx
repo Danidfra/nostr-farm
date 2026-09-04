@@ -1,7 +1,7 @@
 import { Link, useLocation } from 'react-router-dom';
 
 import { cn } from '@/lib/utils';
-import { DEV_ROUTE, DEV_WORLDS_ROUTE } from './enabled';
+import { DEV_INVENTORY_ROUTE, DEV_ROUTE, DEV_WORLDS_ROUTE } from './enabled';
 
 /** Shared chrome for the developer tools, visibly distinct from the game. */
 export function DevLayout({ children }: { children: React.ReactNode }) {
@@ -10,6 +10,7 @@ export function DevLayout({ children }: { children: React.ReactNode }) {
   const tabs = [
     { to: DEV_ROUTE, label: 'Test lab' },
     { to: DEV_WORLDS_ROUTE, label: 'World editor' },
+    { to: DEV_INVENTORY_ROUTE, label: 'Inventory' },
   ];
 
   return (
@@ -51,6 +52,15 @@ export function LiveWarning({ children }: { children: React.ReactNode }) {
       </div>
       {children}
     </div>
+  );
+}
+
+/** Badge for panels that read live relay state but can never publish. */
+export function ReadOnlyBadge() {
+  return (
+    <span className="rounded bg-sky-700 px-2 py-0.5 text-xs font-bold uppercase text-white">
+      Read only — reads relays, never publishes
+    </span>
   );
 }
 

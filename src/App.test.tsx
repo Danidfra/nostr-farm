@@ -17,4 +17,12 @@ describe('App', () => {
     // same situation a production build without the flag is in.
     expect(DEV_TOOLS_ENABLED).toBe(false);
   });
+
+  it('routes /dev/inventory to the not-found page when dev tools are off', async () => {
+    window.history.pushState({}, '', '/dev/inventory');
+    render(<App />);
+    expect(await screen.findByText(/not part of the farm/i)).toBeInTheDocument();
+    expect(screen.queryByText(/farm:main accounting/i)).not.toBeInTheDocument();
+    window.history.pushState({}, '', '/');
+  });
 });

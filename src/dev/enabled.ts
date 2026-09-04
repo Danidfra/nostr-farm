@@ -16,3 +16,4 @@ export const DEV_TOOLS_ENABLED: boolean =
 
 export const DEV_ROUTE = '/dev';
 export const DEV_WORLDS_ROUTE = '/dev/worlds';
+export const DEV_INVENTORY_ROUTE = '/dev/inventory';
