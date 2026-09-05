@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { Download, Eye, EyeOff } from 'lucide-react';
-import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
+import { generateSecretKey, nip19 } from 'nostr-tools';
 
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { toast } from '@/hooks/useToast';
 import { useLoginActions } from '@/hooks/useLoginActions';
+import { NSEC_BACKUP_MIME, nsecBackupFilename } from '@/lib/nsec-backup';
 
 interface SignupDialogProps {
   isOpen: boolean;
@@ -28,16 +29,15 @@ const SignupDialog: React.FC<SignupDialogProps> = ({ isOpen, onClose }) => {
 
   const downloadKey = () => {
     try {
-      const decoded = nip19.decode(nsec);
-      if (decoded.type !== 'nsec') throw new Error('Invalid key');
-
-      const npub = nip19.npubEncode(getPublicKey(decoded.data));
-      const blob = new Blob([nsec], { type: 'text/plain; charset=utf-8' });
+      // Throws for anything that is not an nsec, which the catch below turns
+      // into the "copy it manually" toast.
+      const filename = nsecBackupFilename(nsec);
+      const blob = new Blob([nsec], { type: NSEC_BACKUP_MIME });
       const url = globalThis.URL.createObjectURL(blob);
 
       const a = document.createElement('a');
       a.href = url;
-      a.download = `nostr-farm-${npub.slice(5, 13)}.nsec.txt`;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
