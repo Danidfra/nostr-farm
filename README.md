@@ -305,4 +305,8 @@ None of this is implemented; it is where the foundation is meant to lead.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+The code is MIT. See [LICENSE](LICENSE).
+
+The farm artwork is loaded from a separate renderpack and was generated with
+ChatGPT image generation. How it may be reused, and what is and is not
+claimed about it, is in [ASSETS.md](ASSETS.md).
