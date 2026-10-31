@@ -70,6 +70,34 @@ V1 farms are **personal**. The owner is the sole authority for their own state.
 There is no ambient host, no host election, and no third-party writer whose
 `SlotState` is treated as authoritative.
 
+## Creating a farm: absence must be confirmed
+
+`WorldState` and `MapState` are replaceable, so publishing them over an
+existing farm silently renames it and re-points its entry map. "No farm" is
+therefore a claim the relays have to back, not the default for an empty
+answer. `lookupFarm` (`src/hooks/farm/farm-lookup.ts`) reads every configured
+game relay until `EOSE` (`readFromRelays` in `src/nostr/query.ts`) and
+reports one of:
+
+| Result | Meaning | May publish |
+| --- | --- | --- |
+| `found` | a world and a map parsed, from a completed or an incomplete read | nothing |
+| `absent` | every relay said `EOSE` with no world, on two reads a pause apart | world, then map |
+| `field-missing` | world confirmed, entry map confirmed absent the same way | map only |
+| `unknown` | a relay closed before `EOSE`, timed out or errored | nothing |
+
+A relay that answers `CLOSED` (auth required, rate limited) ends Nostrify's
+`req` stream without `EOSE`, which `relay.query()` reports as an empty array;
+only `readUntilEose` tells the two apart. An event that arrives before the
+stream is cut off still proves the farm exists, so an incomplete read can
+find a farm but never confirm there is none.
+
+`useCreateFarm` repeats the lookup itself immediately before publishing and
+acts on that result alone: `found` publishes nothing, `field-missing` restores
+the map and keeps the world, `absent` publishes both, `unknown` refuses.
+Repeating a create is therefore safe, and a create that landed halfway is
+completed rather than restarted.
+
 ## Slot identity
 
 Slot addresses stay **coordinate-derived**: `slot:<mapId>:<x>:<y>`.

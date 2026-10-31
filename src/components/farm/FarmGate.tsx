@@ -8,7 +8,7 @@ import { Panel, PanelDescription, PanelTitle } from '@/components/game/Panel';
 import { DEFAULT_MAP_DEFINITION_ID, getMapDefinition } from '@/world/definitions/registry';
 import { DEFAULT_RENDERPACK_REF, resolveRenderpack } from '@/world/renderpack/registry';
 import { renderpackAssetUrl } from '@/world/renderpack/load';
-import { CREATE_FARM, ERRORS, LOADING, WELCOME } from './copy';
+import { CREATE_FARM, ERRORS, LOADING, RESTORE_FARM, WELCOME } from './copy';
 
 /**
  * The screens in front of the field: sign in, create, loading, error.
@@ -52,7 +52,11 @@ export function WelcomePanel() {
   );
 }
 
-/** Shown when the signed-in player has no farm yet. */
+/**
+ * Shown only once the relays have CONFIRMED the signed-in player has no farm.
+ * An unconfirmed lookup shows {@link FarmErrorPanel} instead, because the
+ * create action replaces whatever world event may exist.
+ */
 export function CreateFarmPanel({ onCreate, isCreating }: { onCreate: (name: string) => void; isCreating: boolean }) {
   const [name, setName] = useState<string>(CREATE_FARM.defaultName);
 
@@ -83,6 +87,25 @@ export function CreateFarmPanel({ onCreate, isCreating }: { onCreate: (name: str
         </form>
 
         <Disclosure title={CREATE_FARM.howTitle}>{CREATE_FARM.how}</Disclosure>
+      </Panel>
+    </GateScreen>
+  );
+}
+
+/**
+ * Shown when the world event exists but its field does not (a create that
+ * landed halfway). The only action republishes the field; the world, and
+ * with it the farm's name, is left exactly as it is.
+ */
+export function RestoreFieldPanel({ farmName, onRestore, isRestoring }: { farmName: string; onRestore: () => void; isRestoring: boolean }) {
+  return (
+    <GateScreen>
+      <Panel className="w-full max-w-md">
+        <PanelTitle>{RESTORE_FARM.title}</PanelTitle>
+        <PanelDescription className="mt-2">{RESTORE_FARM.description(farmName)}</PanelDescription>
+        <Button size="lg" className="mt-5" disabled={isRestoring} onClick={() => !isRestoring && onRestore()}>
+          {isRestoring ? RESTORE_FARM.busy : RESTORE_FARM.action}
+        </Button>
       </Panel>
     </GateScreen>
   );

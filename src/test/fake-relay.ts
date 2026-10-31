@@ -31,6 +31,44 @@ export class FakeRelayNetwork {
   private gate: { promise: Promise<void>; release(): void } | null = null;
   /** When set, `query` rejects with this error. */
   failQueries: Error | null = null;
+  /** Relays whose subscriptions end before `EOSE`, as a relay that answers `CLOSED` does. */
+  private readonly closingRelays = new Set<string>();
+  /** Relays that never send anything: no events, no `EOSE`. Reads of them end only by abort. */
+  private readonly silentRelays = new Set<string>();
+  /** Relays whose `req` throws at once. */
+  private readonly failingRelays = new Map<string, Error>();
+  /** Event ids a given relay does not hold, although the shared store does. */
+  private readonly withheld = new Map<string, Set<string>>();
+
+  /** Make `relay` close every subscription before `EOSE` (after replaying what it holds). */
+  closeBeforeEose(relay: string): void {
+    this.closingRelays.add(relay);
+  }
+
+  /** Make `relay` never answer; a read of it ends only when its signal aborts. */
+  silence(relay: string): void {
+    this.silentRelays.add(relay);
+  }
+
+  /** Make `relay` throw on `req`. */
+  failRelay(relay: string, error: Error = new Error('connection refused')): void {
+    this.failingRelays.set(relay, error);
+  }
+
+  /** Make `relay` act as though it never received the events with these ids. */
+  withhold(relay: string, ...ids: string[]): void {
+    const set = this.withheld.get(relay) ?? new Set<string>();
+    for (const id of ids) set.add(id);
+    this.withheld.set(relay, set);
+  }
+
+  /** Restore `relay` to normal behaviour. */
+  heal(relay: string): void {
+    this.closingRelays.delete(relay);
+    this.silentRelays.delete(relay);
+    this.failingRelays.delete(relay);
+    this.withheld.delete(relay);
+  }
 
   /** The object the code under test receives from `useNostr().nostr`. */
   readonly pool = {
@@ -116,8 +154,23 @@ export class FakeRelayNetwork {
     this.subscriptions.push(sub);
     this.open.add(sub);
 
-    for (const event of this.matching(filters)) queue.push(['EVENT', 'sub', event]);
-    queue.push(['EOSE', 'sub']);
+    const failure = this.failingRelays.get(relay);
+    if (failure) {
+      this.open.delete(sub);
+      return (async function* () {
+        yield* [] as Message[];
+        throw failure;
+      })();
+    }
+
+    if (!this.silentRelays.has(relay)) {
+      const hidden = this.withheld.get(relay);
+      for (const event of this.matching(filters)) {
+        if (!hidden?.has(event.id)) queue.push(['EVENT', 'sub', event]);
+      }
+      if (this.closingRelays.has(relay)) ended = true;
+      else queue.push(['EOSE', 'sub']);
+    }
 
     const onAbort = () => {
       aborted = true;

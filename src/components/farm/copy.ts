@@ -44,6 +44,21 @@ export const CREATE_FARM = {
   busy: 'Preparing your field…',
   howTitle: 'What gets saved?',
   how: 'Two signed events on the game relay: your farm and its field. Crops are saved as you plant them.',
+  failedTitle: 'Could not create farm',
+  toasts: {
+    created: { title: 'Farm created', description: 'Your field is ready.' },
+    restored: { title: 'Field restored', description: 'Your farm was already there; its field is back.' },
+    existing: { title: 'Farm found', description: 'You already have a farm, so nothing was changed.' },
+  },
+} as const;
+
+/** Shown when the farm exists on the relays but its field does not. */
+export const RESTORE_FARM = {
+  title: 'Your field is missing',
+  description: (farmName: string) =>
+    `Your farm "${farmName}" is on the relays, but its field is not. Restoring it publishes the field again and changes nothing else.`,
+  action: 'Restore field',
+  busy: 'Restoring…',
 } as const;
 
 export const LOADING = {
@@ -53,6 +68,9 @@ export const LOADING = {
 export const ERRORS = {
   farmTitle: 'We could not reach your farm',
   farmMessage: 'The relay did not answer in time. Your farm is still there; try again in a moment.',
+  farmUnknownTitle: 'We could not confirm your farm',
+  farmUnknownMessage:
+    'A relay did not finish answering, so we cannot tell whether you already have a farm. Nothing was changed; try again in a moment.',
   artworkTitle: 'The farm artwork did not load',
   artworkMessage: 'The pictures for your field could not be fetched. Check your connection and try again.',
   retry: 'Try again',

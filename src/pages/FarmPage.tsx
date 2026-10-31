@@ -4,7 +4,7 @@ import { useSeoMeta } from '@unhead/react';
 import type { FarmSlot } from '@/farm/slots/types';
 import type { FarmActionType } from '@/farm/slots/actions';
 import { RenderpackLoadError } from '@/world/renderpack/types';
-import { CreateFarmPanel, FarmErrorPanel, LoadingFieldPanel, WelcomePanel } from '@/components/farm/FarmGate';
+import { CreateFarmPanel, FarmErrorPanel, LoadingFieldPanel, RestoreFieldPanel, WelcomePanel } from '@/components/farm/FarmGate';
 import { CLEAR_ROTTEN, ERRORS } from '@/components/farm/copy';
 import { FarmField, type FieldBurst } from '@/components/farm/FarmField';
 import { GameDialog } from '@/components/game/GameDialog';
@@ -14,7 +14,7 @@ import { SeedPicker } from '@/components/farm/SeedPicker';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNowSeconds } from '@/hooks/useClock';
 import { useCreateFarm } from '@/hooks/farm/useCreateFarm';
-import { useFarm } from '@/hooks/farm/useFarm';
+import { foundFarm, useFarm } from '@/hooks/farm/useFarm';
 import { useFarmActions } from '@/hooks/farm/useFarmActions';
 import { readSlot, readSlotRecord, useFarmSlots } from '@/hooks/farm/useFarmSlots';
 import { useFarmInventory } from '@/hooks/farm/useFarmInventory';
@@ -41,10 +41,12 @@ export default function FarmPage() {
   const { user } = useCurrentUser();
   const nowSec = useNowSeconds();
 
-  const farm = useFarm(user?.pubkey);
+  const lookup = useFarm(user?.pubkey);
+  const farm = foundFarm(lookup.data);
+  const missingFieldWorld = lookup.data?.status === 'field-missing' ? lookup.data.world : undefined;
   const { createFarm, isCreating } = useCreateFarm();
-  const slots = useFarmSlots(user?.pubkey, farm.data?.map.id);
-  const renderpack = useRenderpack(farm.data?.world.renderpack);
+  const slots = useFarmSlots(user?.pubkey, farm?.map.id);
+  const renderpack = useRenderpack(farm?.world.renderpack);
   const { act, isActing } = useFarmActions();
   const inventory = useFarmInventory(user?.pubkey);
   const produceChanges = useProduceChanges(inventory.data);
@@ -62,7 +64,7 @@ export default function FarmPage() {
     return () => timers.forEach(clearTimeout);
   }, []);
 
-  const mapId = farm.data?.map.id;
+  const mapId = farm?.map.id;
 
   const read = useCallback(
     (x: number, y: number): FarmSlot => readSlot(slots.data, mapId ?? '', x, y),
@@ -107,16 +109,16 @@ export default function FarmPage() {
   return (
     <div className="farm-meadow flex h-screen w-screen flex-col overflow-hidden">
       <FarmHud
-        farmName={farm.data?.world.name}
+        farmName={farm?.world.name}
         renderpack={renderpack.data}
         about={
-          farm.data
+          farm
             ? {
-                farmName: farm.data.world.name,
-                mapName: farm.data.definition.name,
-                mapDefinitionId: farm.data.definition.id,
-                mapRevision: farm.data.definition.revision,
-                renderpack: farm.data.world.renderpack,
+                farmName: farm.world.name,
+                mapName: farm.definition.name,
+                mapDefinitionId: farm.definition.id,
+                mapRevision: farm.definition.revision,
+                renderpack: farm.world.renderpack,
               }
             : undefined
         }
@@ -128,24 +130,43 @@ export default function FarmPage() {
       <main className="relative flex-1 overflow-hidden p-3 sm:p-4">
         {!user && <WelcomePanel />}
 
-        {user && farm.isLoading && <LoadingFieldPanel />}
+        {user && lookup.isLoading && <LoadingFieldPanel />}
 
-        {user && farm.isError && (
+        {user && lookup.isError && (
           <FarmErrorPanel
             title={ERRORS.farmTitle}
             message={ERRORS.farmMessage}
-            detail={farm.error instanceof Error ? farm.error.message : 'Unknown error.'}
-            onRetry={() => farm.refetch()}
+            detail={lookup.error instanceof Error ? lookup.error.message : 'Unknown error.'}
+            onRetry={() => lookup.refetch()}
           />
         )}
 
-        {user && !farm.isLoading && !farm.isError && !farm.data && (
-          <CreateFarmPanel onCreate={(name) => void createFarm({ name })} isCreating={isCreating} />
+        {/* Not confirmed either way: a retry, never a Create button. */}
+        {user && lookup.data?.status === 'unknown' && (
+          <FarmErrorPanel
+            title={ERRORS.farmUnknownTitle}
+            message={ERRORS.farmUnknownMessage}
+            detail={lookup.data.detail}
+            onRetry={() => lookup.refetch()}
+          />
         )}
 
-        {user && farm.data && renderpack.isLoading && <LoadingFieldPanel />}
+        {user && lookup.data?.status === 'absent' && (
+          <CreateFarmPanel onCreate={(name) => void createFarm({ name }).catch(() => undefined)} isCreating={isCreating} />
+        )}
 
-        {user && farm.data && renderpack.isError && (
+        {/* The world exists; only its field is republished. The name is not used. */}
+        {user && missingFieldWorld && (
+          <RestoreFieldPanel
+            farmName={missingFieldWorld.name}
+            onRestore={() => void createFarm({ name: missingFieldWorld.name }).catch(() => undefined)}
+            isRestoring={isCreating}
+          />
+        )}
+
+        {user && farm && renderpack.isLoading && <LoadingFieldPanel />}
+
+        {user && farm && renderpack.isError && (
           <FarmErrorPanel
             title={ERRORS.artworkTitle}
             message={ERRORS.artworkMessage}
@@ -154,9 +175,9 @@ export default function FarmPage() {
           />
         )}
 
-        {user && farm.data && renderpack.data && (
+        {user && farm && renderpack.data && (
           <FarmField
-            definition={farm.data.definition}
+            definition={farm.definition}
             renderpack={renderpack.data}
             readSlot={read}
             nowSec={nowSec}
@@ -167,7 +188,7 @@ export default function FarmPage() {
           />
         )}
 
-        {user && farm.data && <ProduceChangeChips notices={produceChanges} renderpack={renderpack.data} />}
+        {user && farm && <ProduceChangeChips notices={produceChanges} renderpack={renderpack.data} />}
 
         {DevFarmTools && devToolsAllowed && mapId && (
           <Suspense fallback={null}>
@@ -175,7 +196,7 @@ export default function FarmPage() {
           </Suspense>
         )}
 
-        {user && farm.data && renderpack.data && seedTarget && (
+        {user && farm && renderpack.data && seedTarget && (
           <SeedPicker
             isOpen
             renderpack={renderpack.data}
