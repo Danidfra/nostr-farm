@@ -263,6 +263,31 @@ and an old plant event resurfaces as current **and** the plot was last
 credited before records existed; from the first record onward the plot is
 covered regardless.
 
+### Before a credit: the plot and the snapshot must both be current
+
+Two reads guard every credit, and each refuses rather than guesses:
+
+- **The plot is re-read by `d` from the game relays** (`readPlotNow` in
+  `useFarmActions`). The harvest is recomputed on what comes back: a watering
+  from another device is honoured and its event is the one consumed; a plot
+  holding a different planting, or nothing, is refused with "changed from
+  another device"; a read in which no relay reached `EOSE` is refused even if
+  the plant was seen, because presence proves nothing about what replaced it.
+- **The snapshot must not be older than one this session has seen.** The
+  highest `revision` this session has read or written is remembered
+  (`knownRevisions`) and passed to `creditHarvest` as `minRevision`. A
+  confirmed read that returns a lower revision, no revision, or no snapshot
+  at all ends in `stale-read` with nothing signed: building on it would drop
+  every later harvest and could credit one again. The floor is per session;
+  a fresh page load has nothing to compare against and trusts the confirmed
+  read, which is the remaining multi-device gap (two devices never share a
+  floor, and a relay that loses the newest snapshot between two loads is not
+  detected).
+
+Neither read makes the harvest atomic. The credit and the empty-slot publish
+are still two events, and a watering from another device can still land
+between them; the per-plot record is what makes that harmless.
+
 ### Scalability limitation
 
 The record set is bounded by the number of plots ever harvested, which is 36

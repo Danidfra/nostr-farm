@@ -109,6 +109,14 @@ export const HARVEST_TOAST = {
   description: 'Added to your basket.',
 } as const;
 
+/** Why a harvest was not started. The crop is always left in place. */
+export const HARVEST_ERRORS = {
+  plotUnconfirmed: (detail: string) =>
+    `The relays did not finish answering about this plot, so the harvest was not started. Try again in a moment. (${detail})`,
+  plotGone: 'The relays have nothing for this plot any more. Refresh to see its current state.',
+  plotChanged: 'This plot was changed from another device. Refresh to see what is growing now.',
+} as const;
+
 export const PRODUCE_CHANGE = {
   usedElsewhere: 'Used in another Nostr game',
   usedIn: (client: string) => `Used in ${client}`,

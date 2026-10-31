@@ -204,3 +204,19 @@ export class FakeRelayNetwork {
     })();
   }
 }
+
+/**
+ * A `req` over a plain array of events, for tests that fake the pool by hand:
+ * replays every event matching the filters, then `EOSE` — or ends without it
+ * when `behaviour().eose` is false, the way a relay that answers `CLOSED`
+ * looks to a client.
+ */
+export function reqOverStore(
+  store: () => readonly NostrEvent[],
+  behaviour: () => { eose: boolean } = () => ({ eose: true })
+): (filters: NostrFilter[], opts?: { signal?: AbortSignal }) => AsyncGenerator<Message> {
+  return async function* (filters) {
+    for (const event of store()) if (matchFilters(filters, event)) yield ['EVENT', 'sub', event];
+    if (behaviour().eose) yield ['EOSE', 'sub'];
+  };
+}

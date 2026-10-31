@@ -786,3 +786,63 @@ describe('planting identity', () => {
     expect((await creditHarvest(w.deps, later('e'.repeat(64)))).status).toBe('already-applied');
   });
 });
+
+describe('revision floor', () => {
+  it('refuses to build on a read that is behind the revision this client already saw', async () => {
+    const w = world();
+    expect((await creditHarvest(w.deps, request)).status).toBe('accepted');
+
+    // The relays answer, but without the snapshot that was just written.
+    const lagging: CreditDeps = { ...w.deps, readInventory: async () => ({ events: [], answered: true }), minRevision: 1 };
+    const result = await creditHarvest(lagging, { ...request, ...SECOND });
+
+    expect(result).toMatchObject({ status: 'stale-read', expectedRevision: 1 });
+    expect(w.published).toEqual([KIND_GAME_INVENTORY]);
+    expect(w.signCount).toBe(1);
+  });
+
+  it('without a floor, the same lagging read rebuilds the inventory from scratch and loses the first harvest', async () => {
+    const w = world();
+    await creditHarvest(w.deps, request);
+    const lagging: CreditDeps = { ...w.deps, readInventory: async () => ({ events: [], answered: true }) };
+
+    const result = await creditHarvest(lagging, { ...request, ...SECOND });
+
+    expect(result.status).toBe('accepted');
+    if (result.status !== 'accepted') return;
+    // This is the hazard the floor exists to stop: one carrot instead of two.
+    expect(produceQuantity(parseSnapshot(result.event), CARROT.address)).toBe(1);
+  });
+
+  it('refuses a snapshot older than the one it has seen, naming both revisions', async () => {
+    const w = world();
+    const older = snapshotEvent({ id: eventId('old'), items: { [CARROT.address]: 1 }, revision: 1, createdAt: 1_700_000_000 });
+    w.seed(older);
+    const lagging: CreditDeps = { ...w.deps, minRevision: 2 };
+
+    const result = await creditHarvest(lagging, request);
+
+    expect(result).toMatchObject({ status: 'stale-read', expectedRevision: 2, seenRevision: 1 });
+    if (result.status === 'stale-read') expect(result.error).toMatch(/revision 1, but this device has already seen revision 2/);
+  });
+
+  it('a snapshot with no revision at all cannot be placed, so it is stale under a floor', async () => {
+    const w = world();
+    w.seed(snapshotEvent({ items: { [CARROT.address]: 1 } }));
+
+    expect((await creditHarvest({ ...w.deps, minRevision: 1 }, request)).status).toBe('stale-read');
+    // And perfectly fine without a floor, as for a fresh page load.
+    expect((await creditHarvest(w.deps, request)).status).toBe('accepted');
+  });
+
+  it('reconciliation treats a stale read as unproven rather than as not-credited', async () => {
+    const w = world({ publish: AMBIGUOUS });
+    const first = await creditHarvest(w.deps, request);
+    expect(first.status).toBe('ambiguous');
+
+    const check = await reconcileCredit({ ...w.deps, readInventory: async () => ({ events: [], answered: true }), minRevision: 1 }, request);
+
+    expect(check.credited).toBe(false);
+    expect(check.stale).toBe(true);
+  });
+});

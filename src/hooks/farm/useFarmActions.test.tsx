@@ -10,6 +10,8 @@ import type { FarmSlot } from '@/farm/slots/types';
 import { INVENTORY_KINDS, KIND_GAME_INVENTORY } from '@/inventory/package';
 import { PRODUCE_CATALOG } from '@/inventory/produce-catalog';
 import { eventId, foldEvent, foldRefs, foldTag, snapshotEvent, spendEvent } from '@/test/inventory-fixtures';
+import { buildSlotState } from '@/nostr/slot-state';
+import { reqOverStore } from '@/test/fake-relay';
 
 const OWNER = 'a'.repeat(64);
 const MAP = 'farm.field';
@@ -17,6 +19,11 @@ const PLANT_EVENT = 'c'.repeat(64);
 
 /** Events published through the SLOT path (kind 31417). */
 const slotPublishes: { kind?: number; tags?: string[][] }[] = [];
+/** What the GAME relays hold for kind:31417: seeded by `record()`, extended by every slot publish. */
+const slotStore: NostrEvent[] = [];
+let slotEvents = 0;
+/** Whether a slot read reaches EOSE; false models a relay that closes the subscription first. */
+let slotReadEose = true;
 /** Events published through the INVENTORY path (kind 31633). */
 const inventoryStore: NostrEvent[] = [];
 /** kind:1417 manifests on the relays. */
@@ -57,7 +64,18 @@ vi.mock('@/hooks/useNostrPublish', () => ({
     mutateAsync: async (template: { kind?: number; tags?: string[][] }) => {
       if (slotPublishFails) throw new Error('slot relay refused');
       slotPublishes.push(template);
-      return template;
+      slotEvents += 1;
+      const event: NostrEvent = {
+        kind: template.kind ?? 0,
+        content: '',
+        tags: template.tags ?? [],
+        id: `slot-${slotEvents}`.padEnd(64, '0'),
+        pubkey: OWNER,
+        created_at: systemClock.now() + slotEvents,
+        sig: 'x'.repeat(128),
+      };
+      slotStore.push(event);
+      return event;
     },
   }),
 }));
@@ -66,6 +84,7 @@ vi.mock('@nostrify/react', () => ({
   useNostr: () => ({
     nostr: {
       relay: () => ({
+        req: reqOverStore(() => slotStore, () => ({ eose: slotReadEose })),
         query: async ([filter]: { kinds?: number[]; ids?: string[] }[]) => {
           const kind = filter.kinds?.[0];
           const source =
@@ -105,18 +124,27 @@ vi.mock('@/hooks/useToast', () => ({
   useToast: () => ({ toast: (t: { title?: string; variant?: string }) => toasts.push(t) }),
 }));
 
-const { useFarmActions } = await import('./useFarmActions');
+const { useFarmActions, forgetObservedRevisions } = await import('./useFarmActions');
 const { farmInventoryQueryKey } = await import('./useFarmInventory');
 type FarmInventoryView = import('./useFarmInventory').FarmInventoryView;
 
-function readyCarrot(): FarmSlot {
+function readyCarrot(coord = { x: 1, y: 1 }, plantedAt = systemClock.now() - 10_000): FarmSlot {
   const crop = CROP_CATALOG.carrot;
   const now = systemClock.now();
-  let plant = plantSeed('carrot', now - 10_000);
+  let plant = plantSeed('carrot', plantedAt);
   // Water enough to be ripe right now, and still wet so it has not rotted.
   plant = { ...plant, growthSec: crop.harvestStage * crop.stageDurationSec, growthUpdatedAt: now };
   plant = waterPlant(plant, now, crop);
-  return { coord: { x: 1, y: 1 }, content: { type: 'plant', plant } };
+  return { coord, content: { type: 'plant', plant } };
+}
+
+/** Put `slot` on the game relays under `id`, replacing any earlier event with that id. */
+function onRelay(slot: FarmSlot, id: string, createdAt = systemClock.now() - 1000): NostrEvent {
+  const event: NostrEvent = { ...buildSlotState({ mapId: MAP, ownerPubkey: OWNER, slot }), id, pubkey: OWNER, created_at: createdAt, sig: 'x'.repeat(128) };
+  const existing = slotStore.findIndex((e) => e.id === id);
+  if (existing >= 0) slotStore.splice(existing, 1);
+  slotStore.push(event);
+  return event;
 }
 
 let client: QueryClient;
@@ -125,10 +153,11 @@ function wrapper({ children }: { children: React.ReactNode }) {
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 }
 
-const record = (slot: FarmSlot, sourceEventId: string | null = PLANT_EVENT) => ({
-  slot,
-  sourceEventId: sourceEventId ?? undefined,
-});
+/** A slot record as the field holds it; a confirmed one is also put on the relays. */
+const record = (slot: FarmSlot, sourceEventId: string | null = PLANT_EVENT) => {
+  if (sourceEventId) onRelay(slot, sourceEventId);
+  return { slot, sourceEventId: sourceEventId ?? undefined };
+};
 
 const inventoryTags = () => inventoryStore.at(-1)?.tags ?? [];
 const carrotQuantity = () => {
@@ -150,6 +179,10 @@ beforeEach(() => {
   slotPublishFails = false;
   inventoryPublishOutcome = 'accepted';
   inventoryAmbiguousLands = false;
+  slotStore.length = 0;
+  slotEvents = 0;
+  slotReadEose = true;
+  forgetObservedRevisions();
 });
 
 afterEach(() => vi.unstubAllGlobals());
@@ -417,15 +450,147 @@ describe('harvest identity', () => {
     expect(harvestMarkers()).toEqual([PLANT_EVENT]);
   });
 
-  it('does not credit the same planting again under a different event id', async () => {
+  it('refuses a stale record of a plot that has since been harvested, without reading the inventory', async () => {
     const { result } = renderHook(() => useFarmActions(), { wrapper });
     const slot = readyCarrot();
 
     await result.current.act({ mapId: MAP, record: record(slot), type: 'harvest' });
-    // Another device watered the crop before harvesting it, so it knows a newer event.
-    await result.current.act({ mapId: MAP, record: record(slot, 'e'.repeat(64)), type: 'harvest' });
+    // A second device still holds the plant under an older event; the relays hold the empty slot.
+    await expect(
+      result.current.act({ mapId: MAP, record: record(slot, 'e'.repeat(64)), type: 'harvest' })
+    ).rejects.toThrow(/another device/);
 
     expect(carrotQuantity()).toBe(1);
+    expect(inventoryStore).toHaveLength(1);
+    expect(slotPublishes).toHaveLength(1);
+  });
+});
+
+describe('the plot is re-read before any credit', () => {
+  const crop = CROP_CATALOG.carrot;
+
+  it('harvests the plot as the relays hold it, honouring a watering from another device', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+    const slot = readyCarrot();
+    const stale = record(slot, PLANT_EVENT);
+    // Another device watered since: the relays' newest event is E2, same planting.
+    const watered: FarmSlot = { ...slot, content: { type: 'plant', plant: waterPlant((slot.content as { plant: ReturnType<typeof plantSeed> }).plant, systemClock.now() - 5, crop) } };
+    onRelay(watered, 'e'.repeat(64), systemClock.now() - 5);
+
+    await result.current.act({ mapId: MAP, record: stale, type: 'harvest' });
+
+    expect(carrotQuantity()).toBe(1);
+    // The credit consumed the fresh event, not the stale one this device held.
+    expect(harvestMarkers()).toEqual(['e'.repeat(64)]);
+    expect(slotPublishes).toHaveLength(1);
+  });
+
+  it('refuses when the plot moved on to a different planting', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+    const slot = readyCarrot();
+    const stale = record(slot, PLANT_EVENT);
+    onRelay(readyCarrot({ x: 1, y: 1 }, systemClock.now() - 5_000), 'e'.repeat(64), systemClock.now() - 5);
+
+    await expect(result.current.act({ mapId: MAP, record: stale, type: 'harvest' })).rejects.toThrow(/another device/);
+
+    expect(inventoryStore).toHaveLength(0);
+    expect(slotPublishes).toHaveLength(0);
+  });
+
+  it('refuses when the relays have nothing for the plot', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+    const stale = record(readyCarrot(), PLANT_EVENT);
+    slotStore.length = 0;
+
+    await expect(result.current.act({ mapId: MAP, record: stale, type: 'harvest' })).rejects.toThrow(/nothing for this plot/);
+
+    expect(inventoryStore).toHaveLength(0);
+    expect(slotPublishes).toHaveLength(0);
+  });
+
+  it('refuses when no relay finished answering, even though the plant was seen', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+    const confirmed = record(readyCarrot(), PLANT_EVENT);
+    slotReadEose = false;
+
+    await expect(result.current.act({ mapId: MAP, record: confirmed, type: 'harvest' })).rejects.toThrow(/did not finish/);
+
+    expect(inventoryStore).toHaveLength(0);
+    expect(slotPublishes).toHaveLength(0);
+  });
+
+  it('clears a plant that reappears after its harvest without crediting it again', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+    const slot = readyCarrot();
+    await result.current.act({ mapId: MAP, record: record(slot), type: 'harvest' });
+    expect(carrotQuantity()).toBe(1);
+
+    // A watering from another device lands AFTER the empty slot: the same planting is back under a new id.
+    const plant = (slot.content as { plant: ReturnType<typeof plantSeed> }).plant;
+    const zombie: FarmSlot = { ...slot, content: { type: 'plant', plant: waterPlant(plant, systemClock.now(), crop) } };
+    onRelay(zombie, 'f'.repeat(64), systemClock.now() + 100);
+
+    await result.current.act({ mapId: MAP, record: { slot: zombie, sourceEventId: 'f'.repeat(64) }, type: 'harvest' });
+
+    expect(carrotQuantity()).toBe(1);
+    expect(inventoryStore).toHaveLength(1);
+    expect(slotPublishes).toHaveLength(2);
+    expect(slotPublishes[1].tags).toContainEqual(['type', 'empty']);
+  });
+
+  it('two devices holding different versions of one plant credit it once', async () => {
+    const slot = readyCarrot();
+    const plant = (slot.content as { plant: ReturnType<typeof plantSeed> }).plant;
+    const watered: FarmSlot = { ...slot, content: { type: 'plant', plant: waterPlant(plant, systemClock.now() - 5, crop) } };
+    const deviceA = record(slot, PLANT_EVENT);
+    const deviceB = { slot: watered, sourceEventId: 'e'.repeat(64) };
+    onRelay(watered, 'e'.repeat(64), systemClock.now() - 5);
+
+    const a = renderHook(() => useFarmActions(), { wrapper });
+    await a.result.current.act({ mapId: MAP, record: deviceA, type: 'harvest' });
+
+    const b = renderHook(() => useFarmActions(), { wrapper });
+    await expect(b.result.current.act({ mapId: MAP, record: deviceB, type: 'harvest' })).rejects.toThrow(/another device/);
+
+    expect(carrotQuantity()).toBe(1);
+    expect(inventoryStore).toHaveLength(1);
+  });
+});
+
+describe('inventory revision floor', () => {
+  const PLOT_2 = 'g'.repeat(64);
+
+  it('refuses to build on a read that is behind a revision this session already wrote', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+    await result.current.act({ mapId: MAP, record: record(readyCarrot()), type: 'harvest' });
+    expect(inventoryStore).toHaveLength(1);
+
+    // The relays "lose" the snapshot this session just wrote.
+    const written = inventoryStore.splice(0, 1);
+
+    await expect(
+      result.current.act({ mapId: MAP, record: record(readyCarrot({ x: 2, y: 2 }), PLOT_2), type: 'harvest' })
+    ).rejects.toThrow(/already seen revision 1/);
+    expect(inventoryStore).toHaveLength(0);
+    expect(slotPublishes).toHaveLength(1);
+
+    // Once they catch up, the same harvest goes through on top of the right base.
+    inventoryStore.push(...written);
+    await result.current.act({ mapId: MAP, record: record(readyCarrot({ x: 2, y: 2 }), PLOT_2), type: 'harvest' });
+    expect(carrotQuantity()).toBe(2);
+  });
+
+  it('refuses an older snapshot than the one it has seen', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+    await result.current.act({ mapId: MAP, record: record(readyCarrot()), type: 'harvest' });
+    await result.current.act({ mapId: MAP, record: record(readyCarrot({ x: 2, y: 2 }), PLOT_2), type: 'harvest' });
+    expect(inventoryStore).toHaveLength(2);
+
+    inventoryStore.splice(1, 1);
+
+    await expect(
+      result.current.act({ mapId: MAP, record: record(readyCarrot({ x: 3, y: 3 }), 'h'.repeat(64)), type: 'harvest' })
+    ).rejects.toThrow(/revision 1, but this device has already seen revision 2/);
     expect(inventoryStore).toHaveLength(1);
   });
 });

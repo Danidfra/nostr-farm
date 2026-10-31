@@ -64,6 +64,13 @@ export interface CreditDeps extends FarmInventoryReadDeps {
   nowSec(): number;
   /** The relay written into references the Farm creates, so others can resolve them. */
   relayHint: string;
+  /**
+   * The highest `farm:main` revision this client has read or written. A read
+   * that comes back older than this — or empty — is a relay that has not
+   * caught up, not a smaller inventory, and nothing is built on top of it.
+   * Undefined until the client has seen a snapshot.
+   */
+  minRevision?: number;
 }
 
 export interface CreditRequest {
@@ -108,6 +115,13 @@ export type CreditResult =
     }
   /** This exact harvest was already credited; nothing was published. */
   | { status: 'already-applied'; inventory: GameInventory; quantity: number }
+  /**
+   * The relays answered with a snapshot older than one this client has
+   * already seen (or with none at all). Nothing was signed: a credit built on
+   * it would drop every later harvest and could re-credit one. Retrying once
+   * the relays have caught up is safe.
+   */
+  | { status: 'stale-read'; error: string; expectedRevision: number; seenRevision?: number }
   /**
    * A definite failure. Nothing was credited; the caller may retry safely. A
    * `fold` here was ACCEPTED by relays but its snapshot was not: it is an
@@ -171,6 +185,9 @@ export async function creditHarvest(deps: CreditDeps, request: CreditRequest): P
   if ('error' in read) return { status: 'rejected', error: read.error };
 
   const { base } = read;
+
+  const stale = staleRead(base, deps.minRevision);
+  if (stale) return stale;
 
   // Idempotency, before anything is built or signed: by event id, or by the
   // plot's record of the planting.
@@ -366,17 +383,41 @@ function withFold(fold: NostrEvent | undefined): { fold?: NostrEvent } {
  * effective one.
  */
 export async function reconcileCredit(
-  deps: Pick<CreditDeps, 'ownerPubkey' | 'readInventory'>,
+  deps: Pick<CreditDeps, 'ownerPubkey' | 'readInventory' | 'minRevision'>,
   request: Pick<CreditRequest, 'consumedEventId' | 'planting' | 'produce'>
-): Promise<{ credited: boolean; inventory: GameInventory | null; quantity: number }> {
+): Promise<{ credited: boolean; inventory: GameInventory | null; quantity: number; stale?: boolean }> {
   const read = await deps.readInventory();
   if (!read.answered) return { credited: false, inventory: null, quantity: 0 };
 
   const inventory = selectNewestInventory(read.events, deps.ownerPubkey);
+  // A snapshot older than one already seen proves nothing either way.
+  if (staleRead(inventory, deps.minRevision)) return { credited: false, inventory, quantity: 0, stale: true };
   return {
     credited: !!inventory && isHarvestCredited(inventory, { consumedEventId: request.consumedEventId, planting: request.planting }),
     inventory,
     quantity: produceQuantity(inventory, request.produce.address),
+  };
+}
+
+/**
+ * Is this read older than what the client already knows?
+ *
+ * With no floor, nothing is stale. With one, a missing snapshot is stale too:
+ * the client has seen an inventory, so "none" means the relay lost it or has
+ * not caught up, and a snapshot without a revision cannot be placed at all.
+ */
+function staleRead(base: GameInventory | null, minRevision: number | undefined): Extract<CreditResult, { status: 'stale-read' }> | null {
+  if (minRevision === undefined) return null;
+  const seen = base?.revision;
+  if (seen !== undefined && seen >= minRevision) return null;
+  return {
+    status: 'stale-read',
+    expectedRevision: minRevision,
+    ...(seen === undefined ? {} : { seenRevision: seen }),
+    error:
+      seen === undefined
+        ? `The relays returned ${base ? 'an inventory with no revision' : 'no inventory'}, but this device has already seen revision ${minRevision}. Nothing was changed; try again once the relays have caught up.`
+        : `The relays returned inventory revision ${seen}, but this device has already seen revision ${minRevision}. Nothing was changed; try again once the relays have caught up.`,
   };
 }
 

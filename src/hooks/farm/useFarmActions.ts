@@ -9,8 +9,10 @@ import type { FarmActionType } from '@/farm/slots/actions';
 import type { FarmSlot } from '@/farm/slots/types';
 import type { HarvestResult } from '@/farm/harvest/types';
 import { systemClock } from '@/farm/time';
-import { buildSlotState } from '@/nostr/slot-state';
-import { DEFAULT_GAME_RELAY } from '@/nostr/relays';
+import { buildSlotState, collectOwnedSlots, type SlotStateEvent } from '@/nostr/slot-state';
+import { KIND_SLOT_STATE } from '@/nostr/kinds';
+import { describeReads, readFromRelays, type RelayPool } from '@/nostr/query';
+import { DEFAULT_GAME_RELAY, GAME_RELAYS } from '@/nostr/relays';
 import { creditHarvest, reconcileCredit, type CreditDeps, type CreditRequest, type CreditResult } from '@/inventory/credit-harvest';
 import { FARM_INVENTORY_D, type HarvestRecord } from '@/inventory/farm-inventory';
 import { getProduceForCrop, type ProduceDefinition } from '@/inventory/produce-catalog';
@@ -21,7 +23,7 @@ import { farmInventoryQueryKey, setFarmInventory } from './useFarmInventory';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
 import { useToast } from '@/hooks/useToast';
-import { ACTION_REJECTION_MESSAGES, HARVEST_TOAST } from '@/components/farm/copy';
+import { ACTION_REJECTION_MESSAGES, HARVEST_ERRORS, HARVEST_TOAST } from '@/components/farm/copy';
 
 export interface FarmActionInput {
   mapId: string;
@@ -87,6 +89,7 @@ export function useFarmActions() {
 
   const creditDeps = useCallback((): CreditDeps => {
     if (!user) throw new Error('Sign in to work your farm.');
+    const minRevision = knownRevisions.get(inventoryLockKey(user.pubkey));
     return {
       ownerPubkey: user.pubkey,
       ...farmInventoryReadDeps(nostr, user.pubkey),
@@ -94,6 +97,7 @@ export function useFarmActions() {
       publish: publishFarmInventory(nostr),
       nowSec: () => systemClock.now(),
       relayHint: INVENTORY_RELAY_HINT,
+      ...(minRevision === undefined ? {} : { minRevision }),
     };
   }, [nostr, user]);
 
@@ -134,15 +138,41 @@ export function useFarmActions() {
         slotD: slotKey(mapId, record.slot.coord.x, record.slot.coord.y),
         plantedAt: record.slot.content.plant.plantedAt,
       };
-      const credit = await runCredit(creditDeps(), {
+
+      // The plot as the relays hold it NOW, not as this device last fetched
+      // it. The harvest is recomputed on that state: a watering from another
+      // device is honoured, a plot that moved on to another planting (or to
+      // nothing) is refused, and a read that did not finish is refused too.
+      const plot = await readPlotNow(nostr, user.pubkey, mapId, planting.slotD);
+      if (!plot.newest || !plot.complete) {
+        throw new HarvestFailedError(
+          plot.newest ? HARVEST_ERRORS.plotUnconfirmed(plot.detail) : plot.complete ? HARVEST_ERRORS.plotGone : HARVEST_ERRORS.plotUnconfirmed(plot.detail),
+          'inventory',
+          false
+        );
+      }
+      const fresh = plot.newest.slot;
+      if (fresh.content.type !== 'plant' || fresh.content.plant.plantedAt !== planting.plantedAt) {
+        queryClient.invalidateQueries({ queryKey: ['farm-slots', user.pubkey, mapId] });
+        throw new HarvestFailedError(HARVEST_ERRORS.plotChanged, 'inventory', false);
+      }
+      const harvested = applyFarmAction(fresh, { type, nowSec: systemClock.now() }, CROP_CATALOG);
+      if (!harvested.ok) throw new FarmActionRejectedError(harvested.reason);
+      if (!harvested.harvest) throw new HarvestFailedError(HARVEST_ERRORS.plotChanged, 'inventory', false);
+
+      const lockKey = inventoryLockKey(user.pubkey);
+      const credit = await runCredit(creditDeps(), lockKey, {
         produce,
-        consumedEventId: record.sourceEventId,
+        consumedEventId: plot.newest.event.id,
         consumedEventRelay: DEFAULT_GAME_RELAY,
         planting,
         liveSlotEventIds: liveSlotEventIds(queryClient.getQueryData<FarmSlots>(['farm-slots', user.pubkey, mapId])),
       });
 
-      if (credit.status === 'rejected' || credit.status === 'fold-unconfirmed') {
+      if (credit.status === 'accepted') observeRevision(lockKey, revisionOf(credit.event));
+      if (credit.status === 'already-applied') observeRevision(lockKey, credit.inventory.revision);
+
+      if (credit.status === 'rejected' || credit.status === 'fold-unconfirmed' || credit.status === 'stale-read') {
         throw new HarvestFailedError(credit.error, 'inventory', false);
       }
       if (credit.status === 'unresolved') throw new HarvestFailedError(credit.error, 'inventory', false);
@@ -162,7 +192,7 @@ export function useFarmActions() {
 
       // Only now is it safe to remove the crop.
       try {
-        await publishEvent(buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: result.slot }));
+        await publishEvent(buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: harvested.slot }));
       } catch (error) {
         throw new HarvestFailedError(
           `Your ${produce.name} was added, but clearing the crop failed. Harvest it again to finish — it will not be counted twice. (${error instanceof Error ? error.message : String(error)})`,
@@ -171,7 +201,7 @@ export function useFarmActions() {
         );
       }
 
-      return { slot: result.slot, harvest: result.harvest, produce };
+      return { slot: harvested.slot, harvest: harvested.harvest, produce };
     },
 
     onMutate: async ({ mapId, record, type, cropId }) => {
@@ -268,9 +298,62 @@ const unconfirmedFolds = new Map<string, NostrEvent>();
  * Run the credit inside the shared write lock, then reconcile an ambiguous
  * outcome once before reporting it.
  */
-async function runCredit(deps: CreditDeps, identity: Omit<CreditRequest, 'unconfirmedFold'>): Promise<CreditResult> {
-  const lockKey = `nostr-worlds:inventory:${deps.ownerPubkey}:${FARM_INVENTORY_D}`;
+/**
+ * The highest `farm:main` revision this session has read or written, per
+ * inventory. A later read that comes back below it is a relay that has not
+ * caught up, and `creditHarvest` refuses to build on it. Session-scoped on
+ * purpose: a fresh page load has nothing to compare against and must trust
+ * the confirmed read, which is the documented residual limitation.
+ */
+const knownRevisions = new Map<string, number>();
 
+function inventoryLockKey(ownerPubkey: string): string {
+  return `nostr-worlds:inventory:${ownerPubkey}:${FARM_INVENTORY_D}`;
+}
+
+function observeRevision(lockKey: string, revision: number | undefined): void {
+  if (revision === undefined) return;
+  const known = knownRevisions.get(lockKey);
+  if (known === undefined || revision > known) knownRevisions.set(lockKey, revision);
+}
+
+function revisionOf(event: NostrEvent): number | undefined {
+  const raw = event.tags.find(([name]) => name === 'revision')?.[1];
+  const value = raw === undefined ? NaN : Number(raw);
+  return Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** Test seam: forget every revision this session has observed. */
+export function forgetObservedRevisions(): void {
+  knownRevisions.clear();
+}
+
+const PLOT_READ_TIMEOUT_MS = 5000;
+
+/**
+ * The plot as the game relays hold it right now, for a harvest.
+ *
+ * `complete` means at least one relay reached EOSE, so `newest` is that
+ * relay's current state for the plot rather than whatever arrived before the
+ * stream was cut. Presence without completeness is not enough to credit on.
+ */
+async function readPlotNow(
+  nostr: RelayPool,
+  ownerPubkey: string,
+  mapId: string,
+  slotD: string
+): Promise<{ newest?: SlotStateEvent; complete: boolean; detail: string }> {
+  const read = await readFromRelays(
+    nostr,
+    GAME_RELAYS.map((relay) => relay.url),
+    [{ kinds: [KIND_SLOT_STATE], authors: [ownerPubkey], '#d': [slotD] }],
+    { timeoutMs: PLOT_READ_TIMEOUT_MS }
+  );
+  const newest = collectOwnedSlots(read.events, ownerPubkey, mapId).get(slotD);
+  return { ...(newest ? { newest } : {}), complete: read.anyComplete, detail: describeReads(read.reads) };
+}
+
+async function runCredit(deps: CreditDeps, lockKey: string, identity: Omit<CreditRequest, 'unconfirmedFold'>): Promise<CreditResult> {
   return withSerializedWrite(lockKey, async () => {
     const request: CreditRequest = { ...identity, unconfirmedFold: unconfirmedFolds.get(lockKey) };
     const result = await creditHarvest(deps, request);
