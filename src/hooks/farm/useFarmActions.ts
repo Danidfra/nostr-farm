@@ -11,8 +11,8 @@ import type { HarvestResult } from '@/farm/harvest/types';
 import { systemClock } from '@/farm/time';
 import { buildSlotState } from '@/nostr/slot-state';
 import { DEFAULT_GAME_RELAY } from '@/nostr/relays';
-import { creditHarvest, reconcileCredit, type CreditDeps, type CreditResult } from '@/inventory/credit-harvest';
-import { FARM_INVENTORY_D } from '@/inventory/farm-inventory';
+import { creditHarvest, reconcileCredit, type CreditDeps, type CreditRequest, type CreditResult } from '@/inventory/credit-harvest';
+import { FARM_INVENTORY_D, type HarvestRecord } from '@/inventory/farm-inventory';
 import { getProduceForCrop, type ProduceDefinition } from '@/inventory/produce-catalog';
 import { withSerializedWrite } from '@/lib/write-lock';
 import { slotKey, type FarmSlotRecord, type FarmSlots } from './useFarmSlots';
@@ -122,7 +122,7 @@ export function useFarmActions() {
         );
       }
 
-      if (!record.sourceEventId) {
+      if (!record.sourceEventId || record.slot.content.type !== 'plant') {
         throw new HarvestFailedError(
           'This crop has not been confirmed on a relay yet. Refresh and try again.',
           'inventory',
@@ -130,7 +130,17 @@ export function useFarmActions() {
         );
       }
 
-      const credit = await runCredit(creditDeps(), record.sourceEventId, produce);
+      const planting: HarvestRecord = {
+        slotD: slotKey(mapId, record.slot.coord.x, record.slot.coord.y),
+        plantedAt: record.slot.content.plant.plantedAt,
+      };
+      const credit = await runCredit(creditDeps(), {
+        produce,
+        consumedEventId: record.sourceEventId,
+        consumedEventRelay: DEFAULT_GAME_RELAY,
+        planting,
+        liveSlotEventIds: liveSlotEventIds(queryClient.getQueryData<FarmSlots>(['farm-slots', user.pubkey, mapId])),
+      });
 
       if (credit.status === 'rejected' || credit.status === 'fold-unconfirmed') {
         throw new HarvestFailedError(credit.error, 'inventory', false);
@@ -234,6 +244,18 @@ function guardKey(mapId: string, record: FarmSlotRecord): string {
 }
 
 /**
+ * The event id currently holding every plot the client has read, or
+ * `undefined` when the field has not been read at all — in which case no
+ * legacy marker may be dropped, because none can be vouched for.
+ */
+function liveSlotEventIds(slots: FarmSlots | undefined): string[] | undefined {
+  if (!slots) return undefined;
+  const ids: string[] = [];
+  for (const record of slots.byAddress.values()) if (record.sourceEventId) ids.push(record.sourceEventId);
+  return ids;
+}
+
+/**
  * kind:1417 manifests this tab signed whose settlement no snapshot has yet
  * confirmed, per inventory. A manifest is immutable and identified by its id;
  * if the retry needs the same manifest, it republishes this one instead of
@@ -246,15 +268,11 @@ const unconfirmedFolds = new Map<string, NostrEvent>();
  * Run the credit inside the shared write lock, then reconcile an ambiguous
  * outcome once before reporting it.
  */
-async function runCredit(
-  deps: CreditDeps,
-  consumedEventId: string,
-  produce: ProduceDefinition
-): Promise<CreditResult> {
+async function runCredit(deps: CreditDeps, identity: Omit<CreditRequest, 'unconfirmedFold'>): Promise<CreditResult> {
   const lockKey = `nostr-worlds:inventory:${deps.ownerPubkey}:${FARM_INVENTORY_D}`;
 
   return withSerializedWrite(lockKey, async () => {
-    const request = { produce, consumedEventId, consumedEventRelay: DEFAULT_GAME_RELAY, unconfirmedFold: unconfirmedFolds.get(lockKey) };
+    const request: CreditRequest = { ...identity, unconfirmedFold: unconfirmedFolds.get(lockKey) };
     const result = await creditHarvest(deps, request);
     rememberFold(lockKey, result);
     if (result.status !== 'ambiguous') return result;

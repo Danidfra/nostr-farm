@@ -404,3 +404,28 @@ describe('harvest with spends from another game', () => {
     expect(harvestMarkers()).toEqual([PLANT_EVENT]);
   });
 });
+
+describe('harvest identity', () => {
+  it('records the planting of the harvested plot next to the event marker', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+    const slot = readyCarrot();
+
+    await result.current.act({ mapId: MAP, record: record(slot), type: 'harvest' });
+
+    const plantedAt = (slot.content as { plant: { plantedAt: number } }).plant.plantedAt;
+    expect(inventoryTags()).toContainEqual(['harvest', `slot:${MAP}:1:1`, String(plantedAt)]);
+    expect(harvestMarkers()).toEqual([PLANT_EVENT]);
+  });
+
+  it('does not credit the same planting again under a different event id', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+    const slot = readyCarrot();
+
+    await result.current.act({ mapId: MAP, record: record(slot), type: 'harvest' });
+    // Another device watered the crop before harvesting it, so it knows a newer event.
+    await result.current.act({ mapId: MAP, record: record(slot, 'e'.repeat(64)), type: 'harvest' });
+
+    expect(carrotQuantity()).toBe(1);
+    expect(inventoryStore).toHaveLength(1);
+  });
+});

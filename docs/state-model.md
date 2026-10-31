@@ -116,6 +116,19 @@ Both are fixed. World and map ids are now validated against
 `/^[a-z0-9][a-z0-9._-]{0,63}$/` — no colons — which makes
 `slot:<mapId>:<x>:<y>` split unambiguously into exactly four parts.
 
+## Planting identity
+
+A slot address names a plot, not a planting: the same address holds one
+crop after another. A **planting** is `(slot d, planted_at)`. `planted_at`
+is assigned once when the seed goes in and copied unchanged by every later
+`SlotState` (watering, developer acceleration), so it survives the event id
+changing with each write. `plantingTime` in `src/farm/slots/transitions.ts`
+stamps every planting strictly after the plot's `last_harvested_at`, which
+makes `planted_at` monotonic per plot across devices and clocks. The
+inventory credits a harvest under this identity; see
+[`farm-inventory.md`](farm-inventory.md). Existing events need no change:
+`planted_at` has been a required tag since schema v2.
+
 ## Why v1 is gone
 
 - It persisted derived values (`stage`, `ready_at`, `expires_at`) next to the

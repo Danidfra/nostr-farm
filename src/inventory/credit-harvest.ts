@@ -17,6 +17,7 @@ import {
   nextCreatedAt,
   produceQuantity,
   selectNewestInventory,
+  type HarvestRecord,
 } from './farm-inventory';
 import { describeUnresolved, loadFarmInventoryState, type FarmInventoryReadDeps } from './effective-inventory';
 import type { ProduceDefinition } from './produce-catalog';
@@ -70,6 +71,14 @@ export interface CreditRequest {
   /** The kind:31417 plant event being consumed. */
   consumedEventId: string;
   consumedEventRelay: string;
+  /**
+   * The planting being harvested: its plot and `plantedAt`. This, not the
+   * event id, is what a credit is keyed on — the id changes with every
+   * watering, the planting does not.
+   */
+  planting: HarvestRecord;
+  /** The current event id of every plot, for bounding the legacy markers. See `CreditInput`. */
+  liveSlotEventIds?: readonly string[];
   /**
    * A kind:1417 this client signed earlier for the same inventory whose
    * settlement was never confirmed by a snapshot — the publish timed out, or
@@ -163,8 +172,9 @@ export async function creditHarvest(deps: CreditDeps, request: CreditRequest): P
 
   const { base } = read;
 
-  // Idempotency, before anything is built or signed.
-  if (base && isHarvestCredited(base, request.consumedEventId)) {
+  // Idempotency, before anything is built or signed: by event id, or by the
+  // plot's record of the planting.
+  if (base && isHarvestCredited(base, { consumedEventId: request.consumedEventId, planting: request.planting })) {
     return {
       status: 'already-applied',
       inventory: base,
@@ -190,6 +200,8 @@ export async function creditHarvest(deps: CreditDeps, request: CreditRequest): P
     produce: request.produce,
     consumedEventId: request.consumedEventId,
     consumedEventRelay: request.consumedEventRelay,
+    planting: request.planting,
+    liveSlotEventIds: request.liveSlotEventIds,
   };
 
   // Preflight the Farm's own mutation against the effective inventory BEFORE
@@ -355,14 +367,14 @@ function withFold(fold: NostrEvent | undefined): { fold?: NostrEvent } {
  */
 export async function reconcileCredit(
   deps: Pick<CreditDeps, 'ownerPubkey' | 'readInventory'>,
-  request: Pick<CreditRequest, 'consumedEventId' | 'produce'>
+  request: Pick<CreditRequest, 'consumedEventId' | 'planting' | 'produce'>
 ): Promise<{ credited: boolean; inventory: GameInventory | null; quantity: number }> {
   const read = await deps.readInventory();
   if (!read.answered) return { credited: false, inventory: null, quantity: 0 };
 
   const inventory = selectNewestInventory(read.events, deps.ownerPubkey);
   return {
-    credited: !!inventory && isHarvestCredited(inventory, request.consumedEventId),
+    credited: !!inventory && isHarvestCredited(inventory, { consumedEventId: request.consumedEventId, planting: request.planting }),
     inventory,
     quantity: produceQuantity(inventory, request.produce.address),
   };

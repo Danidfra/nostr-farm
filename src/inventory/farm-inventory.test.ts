@@ -6,10 +6,14 @@ import { FARM_OFFICIAL_ISSUER_PUBKEY, FARM_GAME_CONTEXT } from './constants';
 import { PRODUCE_CATALOG } from './produce-catalog';
 import {
   FARM_HARVEST_MARKER,
+  FARM_HARVEST_RECORD_TAG,
   FARM_INVENTORY_D,
+  MAX_LEGACY_HARVEST_MARKERS,
   buildCreditEvent,
+  harvestRecords,
   harvestedEventIds,
   isHarvestCredited,
+  retainFarmTags,
   nextCreatedAt,
   produceQuantity,
   selectNewestInventory,
@@ -318,5 +322,139 @@ describe('the empty base', () => {
 
   it('names the inventory by the full address, never by d alone', () => {
     expect(farmInventoryAddress(OWNER)).toBe(`31633:${OWNER}:farm:main`);
+  });
+});
+
+describe('per-plot harvest records', () => {
+  const PLOT = 'slot:farm.field:3:2';
+  const OTHER_PLOT = 'slot:farm.field:0:0';
+  const planting = (plantedAt: number, slotD = PLOT) => ({ slotD, plantedAt });
+  const records = (tags: string[][]) => tags.filter(([t]) => t === FARM_HARVEST_RECORD_TAG);
+
+  it('writes the planting as a record next to the event marker', () => {
+    const first = buildCreditEvent({ base: null, produce: CARROT, consumedEventId: PLANT_EVENT, consumedEventRelay: GAME_RELAY, planting: planting(100) });
+    expect(records(first.tags)).toEqual([[FARM_HARVEST_RECORD_TAG, PLOT, '100']]);
+    expect(harvestRecords(parse(signed(first)))).toEqual(new Map([[PLOT, 100]]));
+  });
+
+  it('keeps one record per plot, replacing the plot\'s older one and keeping every other plot\'s', () => {
+    let base = parse(signed(buildCreditEvent({ base: null, produce: CARROT, consumedEventId: 'd'.repeat(64), consumedEventRelay: GAME_RELAY, planting: planting(100) })));
+    base = parse(signed(buildCreditEvent({ base, produce: PUMPKIN, consumedEventId: 'e'.repeat(64), consumedEventRelay: GAME_RELAY, planting: planting(50, OTHER_PLOT) }), 1_700_000_001));
+    const next = parse(signed(buildCreditEvent({ base, produce: CARROT, consumedEventId: 'f'.repeat(64), consumedEventRelay: GAME_RELAY, planting: planting(900) }), 1_700_000_002));
+
+    expect(harvestRecords(next)).toEqual(new Map([[OTHER_PLOT, 50], [PLOT, 900]]));
+    expect(records(next.event.tags)).toHaveLength(2);
+    expect(produceQuantity(next, CARROT.address)).toBe(2);
+    expect(produceQuantity(next, PUMPKIN.address)).toBe(1);
+  });
+
+  it('answers "credited" for the same planting under any event id, and for older cycles of the plot', () => {
+    const inv = parse(signed(buildCreditEvent({ base: null, produce: CARROT, consumedEventId: PLANT_EVENT, consumedEventRelay: GAME_RELAY, planting: planting(500) })));
+
+    // Same planting, seen through a later watering's event id.
+    expect(isHarvestCredited(inv, { consumedEventId: 'e'.repeat(64), planting: planting(500) })).toBe(true);
+    // An older cycle of the plot that resurfaced.
+    expect(isHarvestCredited(inv, { consumedEventId: 'e'.repeat(64), planting: planting(499) })).toBe(true);
+    // The next cycle of the plot: not credited yet.
+    expect(isHarvestCredited(inv, { consumedEventId: 'e'.repeat(64), planting: planting(501) })).toBe(false);
+    // A different plot: not credited.
+    expect(isHarvestCredited(inv, { consumedEventId: 'e'.repeat(64), planting: planting(500, OTHER_PLOT) })).toBe(false);
+    // The legacy check still answers by id alone.
+    expect(isHarvestCredited(inv, PLANT_EVENT)).toBe(true);
+    expect(isHarvestCredited(inv, { consumedEventId: PLANT_EVENT })).toBe(true);
+  });
+
+  it('a legacy snapshot with markers and no records still answers by id, and never by record', () => {
+    const legacy = parse(signed(firstCredit()));
+    expect(harvestRecords(legacy).size).toBe(0);
+    expect(isHarvestCredited(legacy, { consumedEventId: PLANT_EVENT, planting: planting(1) })).toBe(true);
+    expect(isHarvestCredited(legacy, { consumedEventId: 'e'.repeat(64), planting: planting(1) })).toBe(false);
+  });
+
+  it('ignores malformed records rather than trusting them', () => {
+    const inv = parse(
+      signed(
+        buildCreditEvent({
+          base: parse(signed(firstCredit())),
+          produce: CARROT,
+          consumedEventId: 'd'.repeat(64),
+          consumedEventRelay: GAME_RELAY,
+        })
+      )
+    );
+    const tampered = parse({
+      ...(inv.event as NostrEvent),
+      tags: [...inv.event.tags, [FARM_HARVEST_RECORD_TAG, '', '5'], [FARM_HARVEST_RECORD_TAG, PLOT, 'soon'], [FARM_HARVEST_RECORD_TAG, PLOT, '-1'], [FARM_HARVEST_RECORD_TAG, PLOT]],
+    });
+    expect(harvestRecords(tampered).size).toBe(0);
+  });
+
+  it('never drops a record because of its age', () => {
+    let base = parse(signed(buildCreditEvent({ base: null, produce: CARROT, consumedEventId: 'a'.repeat(64), consumedEventRelay: GAME_RELAY, planting: planting(1, OTHER_PLOT) })));
+    for (let i = 0; i < 300; i += 1) {
+      const id = i.toString(16).padStart(64, '0');
+      base = parse(signed(buildCreditEvent({ base, produce: CARROT, consumedEventId: id, consumedEventRelay: GAME_RELAY, planting: planting(1000 + i), liveSlotEventIds: [] }), 1_700_000_001 + i));
+    }
+    expect(harvestRecords(base).get(OTHER_PLOT)).toBe(1);
+    expect(harvestRecords(base).get(PLOT)).toBe(1299);
+    expect(records(base.event.tags)).toHaveLength(2);
+  });
+});
+
+describe('legacy marker retention', () => {
+  const PLOT = 'slot:farm.field:3:2';
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => i.toString(16).padStart(8, '0').padEnd(64, 'f'));
+  const markerTags = (eventIds: string[]) => eventIds.map((id) => ['e', id, GAME_RELAY, FARM_HARVEST_MARKER]);
+
+  it('drops nothing when no live-id list is supplied', () => {
+    const tags = markerTags(ids(200));
+    expect(retainFarmTags(tags, {})).toEqual(tags);
+  });
+
+  it('keeps the newest window and every marker whose event still holds a plot', () => {
+    const all = ids(200);
+    const stillLive = [all[3], all[77]];
+    const kept = retainFarmTags(markerTags(all), { liveSlotEventIds: stillLive }).map((t) => t[1]);
+
+    expect(kept).toHaveLength(MAX_LEGACY_HARVEST_MARKERS - 1 + stillLive.length);
+    expect(kept.slice(-(MAX_LEGACY_HARVEST_MARKERS - 1))).toEqual(all.slice(-(MAX_LEGACY_HARVEST_MARKERS - 1)));
+    expect(kept).toContain(all[3]);
+    expect(kept).toContain(all[77]);
+    expect(kept).not.toContain(all[4]);
+    // Original order is preserved.
+    expect(kept).toEqual(all.filter((id) => kept.includes(id)));
+  });
+
+  it('leaves tags that are not the Farm\'s untouched, in place', () => {
+    const foreign = [['t', 'hello'], ['p', 'b'.repeat(64)], ['e', 'c'.repeat(64), '', 'mention']];
+    const tags = [foreign[0], ...markerTags(ids(100)), foreign[1], foreign[2]];
+    const kept = retainFarmTags(tags, { liveSlotEventIds: [] });
+    expect(kept[0]).toEqual(foreign[0]);
+    expect(kept.slice(-2)).toEqual([foreign[1], foreign[2]]);
+    expect(kept.filter((t) => t[3] === FARM_HARVEST_MARKER)).toHaveLength(MAX_LEGACY_HARVEST_MARKERS - 1);
+  });
+
+  it('a snapshot with thousands of old markers is rebuilt bounded, with every quantity intact', () => {
+    const old = ids(3000);
+    const base = parse(
+      signed({
+        ...firstCredit(),
+        tags: [...firstCredit().tags.filter((t) => !(t[0] === 'e' && t[3] === FARM_HARVEST_MARKER)), ...markerTags(old)],
+      })
+    );
+    expect(harvestedEventIds(base)).toHaveLength(3000);
+
+    const next = parse(
+      signed(
+        buildCreditEvent({ base, produce: PUMPKIN, consumedEventId: 'd'.repeat(64), consumedEventRelay: GAME_RELAY, planting: { slotD: PLOT, plantedAt: 7 }, liveSlotEventIds: [old[0]] }),
+        1_700_000_001
+      )
+    );
+    expect(harvestedEventIds(next)).toHaveLength(MAX_LEGACY_HARVEST_MARKERS + 1);
+    expect(harvestedEventIds(next)).toContain(old[0]);
+    expect(harvestedEventIds(next).at(-1)).toBe('d'.repeat(64));
+    expect(produceQuantity(next, CARROT.address)).toBe(1);
+    expect(produceQuantity(next, PUMPKIN.address)).toBe(1);
+    expect(harvestRecords(next)).toEqual(new Map([[PLOT, 7]]));
   });
 });
