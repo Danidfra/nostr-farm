@@ -203,6 +203,13 @@ export function preferNewerInventory(current: GameInventory, incoming: GameInven
   return current;
 }
 
+/** The `revision` tag of a snapshot event, when it carries a valid one. */
+export function snapshotRevision(event: NostrEvent): number | undefined {
+  const raw = event.tags.find(([name]) => name === 'revision')?.[1];
+  const value = raw === undefined ? NaN : Number(raw);
+  return Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
 /** Pick the newest valid `farm:main` inventory the owner authored. */
 export function selectNewestInventory(events: readonly NostrEvent[], ownerPubkey: string): GameInventory | null {
   let newest: GameInventory | null = null;

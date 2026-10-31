@@ -288,6 +288,22 @@ Neither read makes the harvest atomic. The credit and the empty-slot publish
 are still two events, and a watering from another device can still land
 between them; the per-plot record is what makes that harmless.
 
+### After a credit: one look back
+
+Three seconds after an accepted credit (`HARVEST_VERIFY_DELAY_MS`), the
+inventory is read once more (`verifyCredit`):
+
+| Relays hold | Outcome | What happens |
+| --- | --- | --- |
+| our snapshot, or a later one carrying our record | `confirmed` | nothing; the harvest toast already said so |
+| a newer snapshot without our record | `overwritten` | the credit runs **once** more under the same `(d, plantedAt)`; the record makes it a no-op if the harvest survived somewhere after all; "Harvest saved again", or "Harvest may be missing" if that run is refused |
+| nothing, an older snapshot, or no answer | `uncertain` | reported ("Harvest not yet confirmed"); never retried on no evidence |
+
+The retry never uses a new identity and never loops. The check is one read
+of the configured relays while the device is still online; it is not a
+guarantee that the snapshot is durable on every relay, and a device that
+goes offline inside those three seconds never looks at all.
+
 ### Scalability limitation
 
 The record set is bounded by the number of plots ever harvested, which is 36

@@ -109,6 +109,23 @@ export const HARVEST_TOAST = {
   description: 'Added to your basket.',
 } as const;
 
+/**
+ * What the verification read a few seconds after a harvest found. A confirmed
+ * harvest says nothing: the harvest toast already did.
+ */
+export const HARVEST_VERIFY = {
+  resaved: { title: 'Harvest saved again', description: 'Another device had overwritten your basket; your harvest was added back.' },
+  lost: (detail: string) => ({
+    variant: 'destructive' as const,
+    title: 'Harvest may be missing',
+    description: `Another device overwrote your basket and your harvest could not be added back: ${detail}`,
+  }),
+  uncertain: {
+    title: 'Harvest not yet confirmed',
+    description: 'The relays did not confirm your basket update. It will show once they catch up; nothing is ever counted twice.',
+  },
+} as const;
+
 /** Why a harvest was not started. The crop is always left in place. */
 export const HARVEST_ERRORS = {
   plotUnconfirmed: (detail: string) =>

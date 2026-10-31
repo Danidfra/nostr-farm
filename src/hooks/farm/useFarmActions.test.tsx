@@ -42,6 +42,10 @@ function recordPublish(event: NostrEvent) {
 let slotPublishFails = false;
 let inventoryPublishOutcome: 'accepted' | 'rejected' | 'ambiguous' = 'accepted';
 let inventoryAmbiguousLands = false;
+/** When set, inventory reads fail (no relay answers). */
+let inventoryReadFails = false;
+/** Run once, right after the next accepted kind:31633 lands: what "another device" does meanwhile. */
+let afterCreditLands: (() => void) | null = null;
 
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({
@@ -87,6 +91,7 @@ vi.mock('@nostrify/react', () => ({
         req: reqOverStore(() => slotStore, () => ({ eose: slotReadEose })),
         query: async ([filter]: { kinds?: number[]; ids?: string[] }[]) => {
           const kind = filter.kinds?.[0];
+          if (inventoryReadFails) throw new Error('relay down');
           const source =
             kind === INVENTORY_KINDS.spend ? spendStore : kind === INVENTORY_KINDS.fold ? foldStore : inventoryStore;
           return source.filter((event) => !filter.ids || filter.ids.includes(event.id));
@@ -107,6 +112,9 @@ vi.mock('@nostrify/react', () => ({
           };
           if (inventoryPublishOutcome === 'accepted') {
             store(event);
+            const meanwhile = afterCreditLands;
+            afterCreditLands = null;
+            meanwhile?.();
             return;
           }
           if (inventoryPublishOutcome === 'ambiguous' && inventoryAmbiguousLands) store(event);
@@ -182,6 +190,8 @@ beforeEach(() => {
   slotStore.length = 0;
   slotEvents = 0;
   slotReadEose = true;
+  inventoryReadFails = false;
+  afterCreditLands = null;
   forgetObservedRevisions();
 });
 
@@ -592,5 +602,87 @@ describe('inventory revision floor', () => {
       result.current.act({ mapId: MAP, record: record(readyCarrot({ x: 3, y: 3 }), 'h'.repeat(64)), type: 'harvest' })
     ).rejects.toThrow(/revision 1, but this device has already seen revision 2/);
     expect(inventoryStore).toHaveLength(1);
+  });
+});
+
+describe('post-write verification', () => {
+  const PUMPKIN = PRODUCE_CATALOG.pumpkin.address;
+  const verified = () => renderHook(() => useFarmActions({ verifyDelayMs: 0 }), { wrapper });
+  const verifyToasts = () => toasts.filter((t) => t.title?.startsWith('Harvest')).map((t) => t.title);
+  const newestSnapshot = () => [...inventoryStore].sort((a, b) => b.created_at - a.created_at)[0];
+
+  it('confirms a credit the relays still show, without saying anything more', async () => {
+    const { result } = verified();
+
+    await result.current.act({ mapId: MAP, record: record(readyCarrot()), type: 'harvest' });
+    await waitFor(() => expect(result.current.lastVerification?.status).toBe('confirmed'));
+
+    expect(verifyToasts()).toEqual([]);
+    expect(inventoryStore).toHaveLength(1);
+  });
+
+  it('re-credits a harvest another device overwrote, once, under the same identity', async () => {
+    const { result } = verified();
+    afterCreditLands = () => {
+      // Another device, from an older (empty) base, publishes a newer snapshot: ours is gone.
+      inventoryStore.push(snapshotEvent({ id: eventId('race'), items: { [PUMPKIN]: 1 }, revision: 1, createdAt: systemClock.now() + 5 }));
+    };
+
+    await result.current.act({ mapId: MAP, record: record(readyCarrot()), type: 'harvest' });
+    await waitFor(() => expect(result.current.lastVerification?.status).toBe('recredited'));
+
+    expect(verifyToasts()).toEqual(['Harvest saved again']);
+    expect(inventoryStore).toHaveLength(3);
+    const final = newestSnapshot();
+    const quantity = (address: string) => Number(final.tags.find((t) => t[0] === 'a' && t[1] === address)?.[3] ?? 0);
+    expect(quantity(PRODUCE_CATALOG.carrot.address)).toBe(1);
+    expect(quantity(PUMPKIN)).toBe(1);
+    expect(final.tags).toContainEqual(['harvest', `slot:${MAP}:1:1`, expect.any(String)]);
+    expect(final.tags.find((t) => t[0] === 'revision')?.[1]).toBe('2');
+  });
+
+  it('reports an unconfirmed credit when the relays cannot be read, and never re-credits', async () => {
+    const { result } = verified();
+    afterCreditLands = () => {
+      inventoryReadFails = true;
+    };
+
+    await result.current.act({ mapId: MAP, record: record(readyCarrot()), type: 'harvest' });
+    await waitFor(() => expect(result.current.lastVerification?.status).toBe('uncertain'));
+
+    expect(verifyToasts()).toEqual(['Harvest not yet confirmed']);
+    expect(inventoryStore).toHaveLength(1);
+  });
+
+  it('reports a lost harvest when the one re-credit is refused, rather than retrying', async () => {
+    const { result } = verified();
+    afterCreditLands = () => {
+      inventoryStore.push(snapshotEvent({ id: eventId('race'), items: { [PUMPKIN]: 1 }, revision: 1, createdAt: systemClock.now() + 5 }));
+      inventoryPublishOutcome = 'rejected';
+    };
+
+    await result.current.act({ mapId: MAP, record: record(readyCarrot()), type: 'harvest' });
+    await waitFor(() => expect(result.current.lastVerification?.status).toBe('lost'));
+
+    expect(verifyToasts()).toEqual(['Harvest may be missing']);
+    expect(toasts.at(-1)?.variant).toBe('destructive');
+    expect(inventoryStore).toHaveLength(2);
+  });
+
+  it('does not verify a harvest that was already credited, because nothing was written', async () => {
+    const { result } = verified();
+    const slot = readyCarrot();
+    await result.current.act({ mapId: MAP, record: record(slot), type: 'harvest' });
+    await waitFor(() => expect(result.current.lastVerification?.status).toBe('confirmed'));
+    toasts.length = 0;
+
+    // A zombie of the same planting: cleared without a credit, so no verification follows.
+    const plant = (slot.content as { plant: ReturnType<typeof plantSeed> }).plant;
+    const zombie: FarmSlot = { ...slot, content: { type: 'plant', plant: waterPlant(plant, systemClock.now(), CROP_CATALOG.carrot) } };
+    onRelay(zombie, 'f'.repeat(64), systemClock.now() + 100);
+    await result.current.act({ mapId: MAP, record: { slot: zombie, sourceEventId: 'f'.repeat(64) }, type: 'harvest' });
+
+    expect(inventoryStore).toHaveLength(1);
+    expect(verifyToasts()).toEqual([]);
   });
 });

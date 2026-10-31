@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNostr } from '@nostrify/react';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -14,7 +14,8 @@ import { KIND_SLOT_STATE } from '@/nostr/kinds';
 import { describeReads, readFromRelays, type RelayPool } from '@/nostr/query';
 import { DEFAULT_GAME_RELAY, GAME_RELAYS } from '@/nostr/relays';
 import { creditHarvest, reconcileCredit, type CreditDeps, type CreditRequest, type CreditResult } from '@/inventory/credit-harvest';
-import { FARM_INVENTORY_D, type HarvestRecord } from '@/inventory/farm-inventory';
+import { FARM_INVENTORY_D, snapshotRevision, type HarvestRecord } from '@/inventory/farm-inventory';
+import { verifyCredit } from '@/inventory/verify-credit';
 import { getProduceForCrop, type ProduceDefinition } from '@/inventory/produce-catalog';
 import { withSerializedWrite } from '@/lib/write-lock';
 import { slotKey, type FarmSlotRecord, type FarmSlots } from './useFarmSlots';
@@ -23,7 +24,7 @@ import { farmInventoryQueryKey, setFarmInventory } from './useFarmInventory';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
 import { useToast } from '@/hooks/useToast';
-import { ACTION_REJECTION_MESSAGES, HARVEST_ERRORS, HARVEST_TOAST } from '@/components/farm/copy';
+import { ACTION_REJECTION_MESSAGES, HARVEST_ERRORS, HARVEST_TOAST, HARVEST_VERIFY } from '@/components/farm/copy';
 
 export interface FarmActionInput {
   mapId: string;
@@ -71,7 +72,7 @@ export class HarvestFailedError extends Error {
  * that vanishes without an item is not recoverable, which is why the ordering
  * is not the other way round.
  */
-export function useFarmActions() {
+export function useFarmActions({ verifyDelayMs = HARVEST_VERIFY_DELAY_MS }: { verifyDelayMs?: number } = {}) {
   const { user } = useCurrentUser();
   const { nostr } = useNostr();
   const { mutateAsync: publishEvent } = useNostrPublish();
@@ -87,6 +88,14 @@ export function useFarmActions() {
    */
   const inFlight = useRef(new Set<string>());
 
+  /** What the last post-write verification found, for the page and for tests. */
+  const [lastVerification, setLastVerification] = useState<HarvestVerification | null>(null);
+  const verifyTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
+  useEffect(() => {
+    const timers = verifyTimers.current;
+    return () => timers.forEach(clearTimeout);
+  }, []);
+
   const creditDeps = useCallback((): CreditDeps => {
     if (!user) throw new Error('Sign in to work your farm.');
     const minRevision = knownRevisions.get(inventoryLockKey(user.pubkey));
@@ -100,6 +109,68 @@ export function useFarmActions() {
       ...(minRevision === undefined ? {} : { minRevision }),
     };
   }, [nostr, user]);
+
+  /**
+   * Read `farm:main` back once, a moment after an accepted credit, and act on
+   * what the relays hold:
+   *
+   * - confirmed: nothing to do, the harvest toast already said so;
+   * - overwritten: another writer replaced our snapshot from an older base.
+   *   The credit is run ONCE more under the very same identity — same plot,
+   *   same `plantedAt` — so if it did survive somewhere after all, the
+   *   record makes the retry a no-op. Never a new identity, never a loop;
+   * - uncertain: the relays could not say. Reported, not retried: a retry on
+   *   no evidence is how a harvest gets counted twice.
+   *
+   * None of this is a guarantee that the snapshot is durable on every relay;
+   * it is one more look, taken while the device is still online.
+   */
+  const verifyHarvest = useCallback(
+    async (written: NostrEvent, request: CreditIdentity, lockKey: string): Promise<void> => {
+      if (!user) return;
+      const identity = { consumedEventId: request.consumedEventId, planting: request.planting };
+      const outcome = await verifyCredit(creditDeps(), written, identity);
+
+      if (outcome.status === 'confirmed') {
+        observeRevision(lockKey, outcome.newest.revision);
+        setLastVerification({ status: 'confirmed' });
+        return;
+      }
+      if (outcome.status === 'uncertain') {
+        setLastVerification({ status: 'uncertain', reason: outcome.reason });
+        toast(HARVEST_VERIFY.uncertain);
+        return;
+      }
+
+      observeRevision(lockKey, outcome.newest.revision);
+      const again = await runCredit(creditDeps(), lockKey, request);
+      if (again.status === 'accepted' || again.status === 'already-applied') {
+        if (again.status === 'accepted') {
+          observeRevision(lockKey, snapshotRevision(again.event));
+          setFarmInventory(queryClient, user.pubkey, { event: again.event, folds: again.folds, spends: again.spends });
+        }
+        queryClient.invalidateQueries({ queryKey: farmInventoryQueryKey(user.pubkey) });
+        setLastVerification({ status: 'recredited' });
+        toast(HARVEST_VERIFY.resaved);
+        return;
+      }
+      const detail = again.error;
+      setLastVerification({ status: 'lost', reason: detail });
+      toast(HARVEST_VERIFY.lost(detail));
+    },
+    [creditDeps, queryClient, toast, user]
+  );
+
+  const scheduleVerification = useCallback(
+    (written: NostrEvent, request: CreditIdentity, lockKey: string) => {
+      const timer = setTimeout(() => {
+        verifyTimers.current.delete(timer);
+        void verifyHarvest(written, request, lockKey).catch(() => undefined);
+      }, verifyDelayMs);
+      verifyTimers.current.add(timer);
+    },
+    [verifyDelayMs, verifyHarvest]
+  );
 
   const mutation = useMutation<{ slot: FarmSlot; harvest?: HarvestResult; produce?: ProduceDefinition }, Error, FarmActionInput>({
     mutationFn: async ({ mapId, record, type, cropId }) => {
@@ -161,15 +232,16 @@ export function useFarmActions() {
       if (!harvested.harvest) throw new HarvestFailedError(HARVEST_ERRORS.plotChanged, 'inventory', false);
 
       const lockKey = inventoryLockKey(user.pubkey);
-      const credit = await runCredit(creditDeps(), lockKey, {
+      const request: CreditIdentity = {
         produce,
         consumedEventId: plot.newest.event.id,
         consumedEventRelay: DEFAULT_GAME_RELAY,
         planting,
         liveSlotEventIds: liveSlotEventIds(queryClient.getQueryData<FarmSlots>(['farm-slots', user.pubkey, mapId])),
-      });
+      };
+      const credit = await runCredit(creditDeps(), lockKey, request);
 
-      if (credit.status === 'accepted') observeRevision(lockKey, revisionOf(credit.event));
+      if (credit.status === 'accepted') observeRevision(lockKey, snapshotRevision(credit.event));
       if (credit.status === 'already-applied') observeRevision(lockKey, credit.inventory.revision);
 
       if (credit.status === 'rejected' || credit.status === 'fold-unconfirmed' || credit.status === 'stale-read') {
@@ -188,6 +260,9 @@ export function useFarmActions() {
         // Show the new balance at once, derived from the very event we signed
         // and the spends it settled, rather than waiting for a relay.
         setFarmInventory(queryClient, user.pubkey, { event: credit.event, folds: credit.folds, spends: credit.spends });
+        // And look again shortly, once the relays have had a moment: a second
+        // device building on an older base can replace this snapshot.
+        scheduleVerification(credit.event, request, lockKey);
       }
 
       // Only now is it safe to remove the crop.
@@ -266,8 +341,20 @@ export function useFarmActions() {
     [mutation]
   );
 
-  return { act, isActing: mutation.isPending };
+  return { act, isActing: mutation.isPending, lastVerification };
 }
+
+/** How long after an accepted credit the relays are read back. */
+export const HARVEST_VERIFY_DELAY_MS = 3000;
+
+/** What the post-write verification of the most recent harvest found. */
+export type HarvestVerification =
+  | { status: 'confirmed' }
+  | { status: 'recredited' }
+  | { status: 'uncertain'; reason: string }
+  | { status: 'lost'; reason: string };
+
+type CreditIdentity = Omit<CreditRequest, 'unconfirmedFold'>;
 
 function guardKey(mapId: string, record: FarmSlotRecord): string {
   return `${mapId}:${record.slot.coord.x}:${record.slot.coord.y}`;
@@ -317,12 +404,6 @@ function observeRevision(lockKey: string, revision: number | undefined): void {
   if (known === undefined || revision > known) knownRevisions.set(lockKey, revision);
 }
 
-function revisionOf(event: NostrEvent): number | undefined {
-  const raw = event.tags.find(([name]) => name === 'revision')?.[1];
-  const value = raw === undefined ? NaN : Number(raw);
-  return Number.isInteger(value) && value >= 0 ? value : undefined;
-}
-
 /** Test seam: forget every revision this session has observed. */
 export function forgetObservedRevisions(): void {
   knownRevisions.clear();
@@ -353,7 +434,7 @@ async function readPlotNow(
   return { ...(newest ? { newest } : {}), complete: read.anyComplete, detail: describeReads(read.reads) };
 }
 
-async function runCredit(deps: CreditDeps, lockKey: string, identity: Omit<CreditRequest, 'unconfirmedFold'>): Promise<CreditResult> {
+async function runCredit(deps: CreditDeps, lockKey: string, identity: CreditIdentity): Promise<CreditResult> {
   return withSerializedWrite(lockKey, async () => {
     const request: CreditRequest = { ...identity, unconfirmedFold: unconfirmedFolds.get(lockKey) };
     const result = await creditHarvest(deps, request);
