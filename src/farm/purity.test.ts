@@ -58,10 +58,21 @@ describe('src/farm stays a pure domain', () => {
   });
 });
 
+/**
+ * The one sanctioned exception is the vendored relay-routing module: the
+ * ecosystem's shared rules for reading from and writing to several relays,
+ * carried verbatim until the kit release that contains it is installed. It
+ * names the primary relay, and it is the only file that does. Everything else
+ * says "the primary relay" (`PRIMARY_RELAY_URL` in `src/nostr/relays.ts`), so
+ * this guard still catches any other game's vocabulary or rules creeping in.
+ */
+const VENDORED_RELAY_ROUTING = join('lib', 'relay-routing.ts');
+
 describe('no Blobbi coupling anywhere in src', () => {
   it('does not mention blobbi', () => {
     const offenders = walk(SRC_DIR, isSource)
       .filter((f) => !f.endsWith(join('farm', 'purity.test.ts')))
+      .filter((f) => !f.endsWith(VENDORED_RELAY_ROUTING))
       .filter((f) => /blobbi/i.test(readFileSync(f, 'utf8')));
     expect(offenders.map((f) => relative(process.cwd(), f))).toEqual([]);
   });
