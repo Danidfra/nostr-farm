@@ -72,12 +72,8 @@ vi.mock('@nostrify/react', () => ({
   useNostr: () => ({
     nostr: {
       relay: () => ({
-        req: reqOverStore(() => slotPublishes),
-        query: async ([filter]: { kinds?: number[]; ids?: string[] }[]) => {
-          const kind = filter.kinds?.[0];
-          const source = kind === INVENTORY_KINDS.spend ? spendStore : kind === INVENTORY_KINDS.fold ? foldStore : inventoryStore;
-          return source.filter((event) => !filter.ids || filter.ids.includes(event.id));
-        },
+        // Every read is a REQ read until EOSE: plots, and the three ledger kinds.
+        req: reqOverStore(() => [...slotPublishes, ...inventoryStore, ...foldStore, ...spendStore]),
         event: async (event: NostrEvent) => {
           if (!offered.has(event.id)) {
             offered.add(event.id);

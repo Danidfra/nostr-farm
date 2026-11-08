@@ -72,15 +72,17 @@ function world(options: WorldOptions = {}) {
       reads += 1;
       if (readsToFail > 0) {
         readsToFail -= 1;
-        return { events: [], answered: options.answered ?? false };
+        return { events: [], answered: options.answered ?? false, anchored: options.answered ?? false, complete: options.answered ?? false };
       }
-      return { events: [...store], answered: true };
+      return { events: [...store], answered: true, anchored: true, complete: true };
     },
-    readSpends: async () => ({ events: [...spends], answered: options.spendsAnswered ?? true }),
-    readFolds: async () => ({ events: [...folds], answered: true }),
+    readSpends: async () => ({ events: [...spends], answered: options.spendsAnswered ?? true, anchored: options.spendsAnswered ?? true, complete: options.spendsAnswered ?? true }),
+    readFolds: async () => ({ events: [...folds], answered: true, anchored: true, complete: true }),
     readFoldsById: async (references) => ({
       events: folds.filter((fold) => references.some((reference) => reference.eventId === fold.id)),
       answered: true,
+      anchored: true,
+      complete: true,
     }),
     signEvent: async (template) => {
       signCount += 1;
@@ -183,7 +185,7 @@ describe('unusable reads never become an empty base', () => {
       ...w.deps,
       readInventory: async () => {
         call += 1;
-        return call === 1 ? { events: [], answered: true } : { events: [], answered: false };
+        return call === 1 ? { events: [], answered: true, anchored: true, complete: true } : { events: [], answered: false, anchored: false, complete: false };
       },
       signEvent: async () => {
         throw new Error('should not sign');
@@ -193,6 +195,57 @@ describe('unusable reads never become an empty base', () => {
     const result = await creditHarvest(deps, request);
     expect(result.status).toBe('rejected');
     expect(w.store).toHaveLength(0);
+  });
+
+  it('does not take an empty answer for "no inventory" while a relay has not answered', async () => {
+    // Some relay reached EOSE with nothing; another closed or timed out. The
+    // one that did not answer may be the one holding the inventory.
+    const w = world();
+    const deps: CreditDeps = {
+      ...w.deps,
+      readInventory: async () => ({ events: [], answered: true, anchored: true, complete: false }),
+    };
+
+    const result = await creditHarvest(deps, request);
+
+    expect(result.status).toBe('rejected');
+    expect(w.signCount).toBe(0);
+    expect(w.published).toEqual([]);
+    expect(w.store).toHaveLength(0);
+  });
+
+  it('does not believe an empty confirming read that not every relay finished', async () => {
+    const w = world();
+    let call = 0;
+    const deps: CreditDeps = {
+      ...w.deps,
+      readInventory: async () => {
+        call += 1;
+        return { events: [], answered: true, anchored: true, complete: call === 1 };
+      },
+    };
+
+    const result = await creditHarvest(deps, request);
+
+    expect(result.status).toBe('rejected');
+    expect(w.signCount).toBe(0);
+  });
+
+  it('does not build on a snapshot found only where writes are not guaranteed to be', async () => {
+    // Found, but none of the relays a write must land on answered: the copy
+    // may be many revisions old, and a credit on it would drop the rest.
+    const w = world();
+    const found = snapshotEvent({ id: eventId('old'), items: { [CARROT.address]: 1 }, revision: 1 });
+    const deps: CreditDeps = {
+      ...w.deps,
+      readInventory: async () => ({ events: [found], answered: true, anchored: false, complete: false }),
+    };
+
+    const result = await creditHarvest(deps, request);
+
+    expect(result.status).toBe('rejected');
+    expect(w.signCount).toBe(0);
+    expect(w.published).toEqual([]);
   });
 
   it('uses an inventory the confirming read reveals, instead of replacing it', async () => {
@@ -206,7 +259,7 @@ describe('unusable reads never become an empty base', () => {
       ...w.deps,
       readInventory: async () => {
         call += 1;
-        return call === 1 ? { events: [], answered: true } : { events: existing, answered: true };
+        return call === 1 ? { events: [], answered: true, anchored: true, complete: true } : { events: existing, answered: true, anchored: true, complete: true };
       },
     };
 
@@ -329,7 +382,7 @@ describe('ambiguous reconciliation', () => {
   it('treats an unreadable reconciliation as not-credited rather than credited', async () => {
     const deps = {
       ownerPubkey: OWNER,
-      readInventory: async () => ({ events: [], answered: false }),
+      readInventory: async () => ({ events: [], answered: false, anchored: false, complete: false }),
     };
     expect((await reconcileCredit(deps, request)).credited).toBe(false);
   });
@@ -793,7 +846,7 @@ describe('revision floor', () => {
     expect((await creditHarvest(w.deps, request)).status).toBe('accepted');
 
     // The relays answer, but without the snapshot that was just written.
-    const lagging: CreditDeps = { ...w.deps, readInventory: async () => ({ events: [], answered: true }), minRevision: 1 };
+    const lagging: CreditDeps = { ...w.deps, readInventory: async () => ({ events: [], answered: true, anchored: true, complete: true }), minRevision: 1 };
     const result = await creditHarvest(lagging, { ...request, ...SECOND });
 
     expect(result).toMatchObject({ status: 'stale-read', expectedRevision: 1 });
@@ -804,7 +857,7 @@ describe('revision floor', () => {
   it('without a floor, the same lagging read rebuilds the inventory from scratch and loses the first harvest', async () => {
     const w = world();
     await creditHarvest(w.deps, request);
-    const lagging: CreditDeps = { ...w.deps, readInventory: async () => ({ events: [], answered: true }) };
+    const lagging: CreditDeps = { ...w.deps, readInventory: async () => ({ events: [], answered: true, anchored: true, complete: true }) };
 
     const result = await creditHarvest(lagging, { ...request, ...SECOND });
 
@@ -840,7 +893,7 @@ describe('revision floor', () => {
     const first = await creditHarvest(w.deps, request);
     expect(first.status).toBe('ambiguous');
 
-    const check = await reconcileCredit({ ...w.deps, readInventory: async () => ({ events: [], answered: true }), minRevision: 1 }, request);
+    const check = await reconcileCredit({ ...w.deps, readInventory: async () => ({ events: [], answered: true, anchored: true, complete: true }), minRevision: 1 }, request);
 
     expect(check.credited).toBe(false);
     expect(check.stale).toBe(true);

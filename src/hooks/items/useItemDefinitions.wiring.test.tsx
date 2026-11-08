@@ -9,14 +9,18 @@ import { FARM_OFFICIAL_ISSUER_PUBKEY } from '@/inventory/constants';
 let relayEvents: NostrEvent[] = [];
 let relayFails = false;
 
+vi.mock('@/hooks/useCurrentUser', () => ({ useCurrentUser: () => ({ user: undefined }) }));
+
 vi.mock('@nostrify/react', () => ({
   useNostr: () => ({
     nostr: {
       relay: () => ({
-        query: async () => {
+        req: async function* () {
           if (relayFails) throw new Error('refused');
-          return relayEvents;
+          for (const event of relayEvents) yield ['EVENT', 'sub', event];
+          yield ['EOSE', 'sub'];
         },
+        event: async () => undefined,
       }),
     },
   }),

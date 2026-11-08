@@ -9,6 +9,7 @@ import {
   type UnsignedEventTemplate,
 } from '@/inventory/package';
 import { ITEM_REGISTRY_RELAYS } from '@/inventory/constants';
+import { deliveryFromError, relaySync } from '@/nostr/relay-sync';
 import { upsertDefinitionRecord, type ItemDefinitionRecord } from './useItemDefinitions';
 
 export interface RelayPublishOutcome {
@@ -36,7 +37,10 @@ function describeError(error: unknown): string {
 
 /**
  * Sign a kind:31632 template with the connected signer and offer it to every
- * registry relay.
+ * registry relay: the primary relay and the cross-client ones, the same signed
+ * event to each. The primary relay accepts definitions from recognised issuers
+ * only, so for any other signer its row reads as a refusal while the others
+ * accept; that is reported as it is, like every other relay's answer.
  *
  * This deliberately does not go through `useNostrPublish`: that helper writes
  * to the single configured game relay and reports success generously, which is
@@ -86,8 +90,10 @@ export function usePublishItemDefinition() {
         ITEM_REGISTRY_RELAYS.map(async (relay): Promise<RelayPublishOutcome> => {
           try {
             await nostr.relay(relay).event(event, { signal: AbortSignal.timeout(PUBLISH_TIMEOUT_MS) });
+            relaySync.recordDeliveries(event, [{ relay, verdict: 'accepted' }]);
             return { relay, ok: true };
           } catch (error) {
+            relaySync.recordDeliveries(event, [deliveryFromError(relay, error)]);
             return { relay, ok: false, error: describeError(error) };
           }
         })

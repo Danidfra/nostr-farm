@@ -1,10 +1,18 @@
 import type { NPool, NostrEvent, NostrFilter } from '@nostrify/nostrify';
 
-import { buildGameInventoryFilter, buildGameInventoryFoldFilter, buildGameInventorySpendFilter } from '@/inventory/package';
-import { ITEM_REGISTRY_RELAYS } from '@/inventory/constants';
+import {
+  INVENTORY_KINDS,
+  buildGameInventoryFilter,
+  buildGameInventoryFoldFilter,
+  buildGameInventorySpendFilter,
+} from '@/inventory/package';
+import { ITEM_REGISTRY_RELAYS, ITEM_REGISTRY_SECONDARY_RELAYS } from '@/inventory/constants';
 import { FARM_INVENTORY_D, farmInventoryAddress } from '@/inventory/farm-inventory';
 import type { FarmInventoryReadDeps } from '@/inventory/effective-inventory';
-import { dedupeEventsById, type EventReference, type InventoryReadResult, type PublishOutcome } from '@/inventory/relay-io';
+import { completeRead, type EventReference, type InventoryReadResult, type PublishOutcome } from '@/inventory/relay-io';
+import { classifyRejection, type DeliveryResult } from '@/lib/relay-routing';
+import { anyCompleteAmong, readFromRelays } from '@/nostr/query';
+import { deliveryFromError, ownEventsOfKinds, relaySync } from '@/nostr/relay-sync';
 
 /**
  * Relay plumbing for kind:31633, kind:1416 and kind:1417.
@@ -19,14 +27,37 @@ import { dedupeEventsById, type EventReference, type InventoryReadResult, type P
  * different debit than the next reader sees; querying every configured relay
  * and deduplicating by id is the closest a client can get. It is not global
  * completeness — no relay set gives that — and nothing here claims it.
+ *
+ * The primary relay comes first and is asked and written like the others,
+ * with two differences while its write list is a pilot allowlist:
+ *
+ * - a write counts only when one of `INVENTORY_SECONDARY_RELAYS` accepted it.
+ *   The primary refusing the player, or an event it finds too large, is then
+ *   "held by the others, not by the primary", never a failed harvest;
+ * - a read counts as current (`anchored`) only when one of those secondaries
+ *   finished it, since that is where every write is known to be.
  */
 export const INVENTORY_RELAYS = ITEM_REGISTRY_RELAYS;
 
-/** The relay written into references the Farm creates (fold and inventory hints). */
-export const INVENTORY_RELAY_HINT = INVENTORY_RELAYS[0];
+/** The relays whose acceptance makes an inventory write count. */
+export const INVENTORY_SECONDARY_RELAYS = ITEM_REGISTRY_SECONDARY_RELAYS;
+
+/**
+ * The relay written into references the Farm creates (fold and inventory
+ * hints). A secondary, not the primary: a hint must point somewhere the event
+ * certainly is.
+ */
+export const INVENTORY_RELAY_HINT = INVENTORY_SECONDARY_RELAYS[0];
 
 const READ_TIMEOUT_MS = 6000;
 const PUBLISH_TIMEOUT_MS = 8000;
+/** Once the secondaries have answered, a relay still silent gets this much longer. */
+const READ_GRACE_MS = 1500;
+/** Once the secondaries have settled a publish, the primary gets this much longer to answer. */
+const PRIMARY_PUBLISH_GRACE_MS = 1500;
+
+/** The ledger kinds the Farm may carry between its inventory relays: the player's own, nothing else. */
+const LEDGER_KINDS: readonly number[] = [INVENTORY_KINDS.inventory, INVENTORY_KINDS.spend, INVENTORY_KINDS.fold];
 
 /**
  * Is this failure a definite "no" from the relay, or just silence?
@@ -34,43 +65,75 @@ const PUBLISH_TIMEOUT_MS = 8000;
  * A timeout or abort means the event may still have been accepted, which is a
  * different situation from a relay that answered with a rejection. Treating the
  * two alike is what turns a retry into a duplicate credit.
+ *
+ * A relay that answered `OK false` with a machine-readable refusal
+ * (`blocked:`, `invalid:`, `restricted:` ...) has answered, whatever words
+ * follow the prefix: a write-list refusal is definite even if its text were to
+ * mention a timeout.
  */
-function isIndefinite(error: unknown): boolean {
+export function isIndefinite(error: unknown): boolean {
   const name = error instanceof Error ? error.name : '';
-  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-  return name === 'TimeoutError' || name === 'AbortError' || message.includes('timeout') || message.includes('abort');
+  const message = error instanceof Error ? error.message : String(error);
+  if (name === 'TimeoutError' || name === 'AbortError') return true;
+  if (classifyRejection(message) === 'rejected') return false;
+  const text = message.toLowerCase();
+  return text.includes('timeout') || text.includes('abort');
 }
 
-function readSignal(signal?: AbortSignal): AbortSignal {
-  return signal ? AbortSignal.any([signal, AbortSignal.timeout(READ_TIMEOUT_MS)]) : AbortSignal.timeout(READ_TIMEOUT_MS);
+interface QueryOptions {
+  signal?: AbortSignal;
+  /**
+   * The player whose ledger this read is, when its result may be used to
+   * carry events between relays. Unset, nothing is carried.
+   */
+  syncOwner?: string;
+  /** An empty result decides nothing here, so it need not wait for a slow relay. */
+  graceOnEmpty?: boolean;
 }
 
 /**
  * Query one filter on every relay in `relays`, merging and deduplicating.
  *
- * One relay answering is enough to have *an* answer; every relay failing is
- * not an empty result, it is an unusable read.
+ * Each relay is read until `EOSE` and its outcome kept: a relay that closed
+ * the subscription or timed out DID NOT ANSWER, which is not the same as
+ * answering with nothing. See `InventoryReadResult` for what each flag allows.
+ *
+ * Addressable events (the snapshot) are reduced to their newest revision by
+ * the callers (`selectNewestInventory`); regular events (spends, manifests)
+ * are history and every distinct id is kept.
+ *
+ * Afterwards, a relay that FINISHED its answer and lacks one of the player's
+ * own ledger events another relay returned is offered the original event.
  */
 async function queryRelays(
   nostr: NPool,
   relays: readonly string[],
   filter: NostrFilter,
-  signal?: AbortSignal
+  options: QueryOptions = {}
 ): Promise<InventoryReadResult> {
-  const results = await Promise.all(
-    relays.map(async (relay) => {
-      try {
-        const events = await nostr.relay(relay).query([filter], { signal: readSignal(signal) });
-        return { ok: true as const, events };
-      } catch {
-        return { ok: false as const, events: [] as NostrEvent[] };
-      }
-    })
-  );
+  const read = await readFromRelays(nostr, relays, [filter], {
+    signal: options.signal,
+    timeoutMs: READ_TIMEOUT_MS,
+    graceMs: READ_GRACE_MS,
+    anchors: INVENTORY_SECONDARY_RELAYS,
+    graceOnEmpty: options.graceOnEmpty,
+  });
+
+  if (options.syncOwner) {
+    void relaySync.carryMissing(nostr, {
+      account: options.syncOwner,
+      reads: read.reads,
+      filters: [filter],
+      allows: ownEventsOfKinds(options.syncOwner, LEDGER_KINDS),
+      destinations: INVENTORY_RELAYS,
+    });
+  }
 
   return {
-    events: dedupeEventsById(results.flatMap((result) => result.events)),
-    answered: results.some((result) => result.ok),
+    events: read.events,
+    answered: read.anyComplete,
+    anchored: anyCompleteAmong(read, INVENTORY_SECONDARY_RELAYS),
+    complete: read.allComplete,
   };
 }
 
@@ -93,7 +156,7 @@ export function readFarmInventory(nostr: NPool, ownerPubkey: string, signal?: Ab
       authors: [ownerPubkey],
       inventoryIds: [FARM_INVENTORY_D],
     }) as unknown as NostrFilter;
-    return queryRelays(nostr, INVENTORY_RELAYS, filter, signal);
+    return queryRelays(nostr, INVENTORY_RELAYS, filter, { signal, syncOwner: ownerPubkey });
   };
 }
 
@@ -111,7 +174,7 @@ export function readFarmSpends(nostr: NPool, ownerPubkey: string, signal?: Abort
       authors: [ownerPubkey],
       inventoryAddresses: [farmInventoryAddress(ownerPubkey)],
     }) as unknown as NostrFilter;
-    return queryRelays(nostr, INVENTORY_RELAYS, filter, signal);
+    return queryRelays(nostr, INVENTORY_RELAYS, filter, { signal, syncOwner: ownerPubkey, graceOnEmpty: true });
   };
 }
 
@@ -122,7 +185,7 @@ export function readFarmFolds(nostr: NPool, ownerPubkey: string, signal?: AbortS
       authors: [ownerPubkey],
       inventoryAddresses: [farmInventoryAddress(ownerPubkey)],
     }) as unknown as NostrFilter;
-    return queryRelays(nostr, INVENTORY_RELAYS, filter, signal);
+    return queryRelays(nostr, INVENTORY_RELAYS, filter, { signal, syncOwner: ownerPubkey, graceOnEmpty: true });
   };
 }
 
@@ -130,12 +193,19 @@ export function readFarmFolds(nostr: NPool, ownerPubkey: string, signal?: AbortS
  * Specific manifests by id, on the configured relays plus whatever relay each
  * reference hinted at. A hint is one more place to look, never the only one.
  */
-export function readFarmFoldsById(nostr: NPool, signal?: AbortSignal) {
+export function readFarmFoldsById(nostr: NPool, signal?: AbortSignal, ownerPubkey?: string) {
   return async (references: EventReference[]): Promise<InventoryReadResult> => {
     const ids = [...new Set(references.map((reference) => reference.eventId))];
-    if (ids.length === 0) return { events: [], answered: true };
+    if (ids.length === 0) return completeRead();
     const filter = buildGameInventoryFoldFilter({ ids }) as unknown as NostrFilter;
-    return queryRelays(nostr, [...INVENTORY_RELAYS, ...extraRelays(references)], filter, signal);
+    // A manifest found on one relay (or on the relay a reference hinted at) and
+    // certainly missing from an inventory relay is carried there, so the chain
+    // resolves from any of them. Hinted relays are read, never written.
+    return queryRelays(nostr, [...INVENTORY_RELAYS, ...extraRelays(references)], filter, {
+      signal,
+      ...(ownerPubkey ? { syncOwner: ownerPubkey } : {}),
+      graceOnEmpty: true,
+    });
   };
 }
 
@@ -177,37 +247,79 @@ export function farmInventoryReadDeps(nostr: NPool, ownerPubkey: string, signal?
     readInventory: readFarmInventory(nostr, ownerPubkey, signal),
     readSpends: readFarmSpends(nostr, ownerPubkey, signal),
     readFolds: readFarmFolds(nostr, ownerPubkey, signal),
-    readFoldsById: readFarmFoldsById(nostr, signal),
+    readFoldsById: readFarmFoldsById(nostr, signal, ownerPubkey),
   };
 }
 
-/** Offer a kind:31633 or kind:1417 to every configured inventory relay. */
+/**
+ * Offer a kind:31633 or kind:1417 to every configured inventory relay: the
+ * same signed event to the primary and to the secondaries, with each relay's
+ * verdict recorded.
+ *
+ * `accepted` means a SECONDARY accepted it. The primary relay's answer never
+ * decides the outcome on its own:
+ *
+ * - it refuses (a write list, or `invalid:` for a snapshot larger than it
+ *   takes) or says nothing, and a secondary accepted → `accepted`. The sync
+ *   ledger knows the primary is behind and the About dialog says so;
+ * - ONLY the primary accepted → `ambiguous`, not `accepted`: the event exists,
+ *   but not yet where other clients look for it. The caller's reconcile read
+ *   then finds it and carries on, and the next read carries it to the
+ *   secondaries;
+ * - nobody accepted and some relay merely went quiet → `ambiguous`;
+ * - everybody answered no → `rejected`.
+ *
+ * The primary is not waited for beyond a short grace once the secondaries
+ * have settled; its late verdict still reaches the ledger.
+ */
 export function publishFarmInventory(nostr: NPool) {
   return async (event: NostrEvent): Promise<PublishOutcome> => {
-    const results = await Promise.all(
-      INVENTORY_RELAYS.map(async (relay) => {
-        try {
-          await nostr.relay(relay).event(event, { signal: AbortSignal.timeout(PUBLISH_TIMEOUT_MS) });
-          return { relay, ok: true as const, indefinite: false, error: '' };
-        } catch (error) {
-          return {
-            relay,
-            ok: false as const,
-            indefinite: isIndefinite(error),
-            error: error instanceof Error ? error.message : String(error),
-          };
-        }
-      })
-    );
+    interface Attempt {
+      relay: string;
+      ok: boolean;
+      indefinite: boolean;
+      error: string;
+      delivery: DeliveryResult;
+    }
+    const settled = new Map<string, Attempt>();
+    const isSecondary = (relay: string) => INVENTORY_SECONDARY_RELAYS.includes(relay);
 
+    const attempts = INVENTORY_RELAYS.map(async (relay) => {
+      let attempt: Attempt;
+      try {
+        await nostr.relay(relay).event(event, { signal: AbortSignal.timeout(PUBLISH_TIMEOUT_MS) });
+        attempt = { relay, ok: true, indefinite: false, error: '', delivery: { relay, verdict: 'accepted' } };
+      } catch (error) {
+        attempt = {
+          relay,
+          ok: false,
+          indefinite: isIndefinite(error),
+          error: error instanceof Error ? error.message : String(error),
+          delivery: deliveryFromError(relay, error),
+        };
+      }
+      settled.set(relay, attempt);
+      relaySync.recordDeliveries(event, [attempt.delivery]);
+    });
+
+    const secondaries = Promise.all(attempts.filter((_, index) => isSecondary(INVENTORY_RELAYS[index])));
+    await secondaries;
+    await Promise.race([Promise.all(attempts), new Promise((resolve) => setTimeout(resolve, PRIMARY_PUBLISH_GRACE_MS))]);
+
+    const results = [...settled.values()];
+    const silent = INVENTORY_RELAYS.filter((relay) => !settled.has(relay));
     const acceptedRelays = results.filter((result) => result.ok).map((result) => result.relay);
-    const errors = results.filter((result) => !result.ok).map(({ relay, error }) => ({ relay, error }));
+    const errors = [
+      ...results.filter((result) => !result.ok).map(({ relay, error }) => ({ relay, error })),
+      ...silent.map((relay) => ({ relay, error: 'no answer yet' })),
+    ];
 
-    if (acceptedRelays.length > 0) return { status: 'accepted', acceptedRelays, errors };
+    if (acceptedRelays.some(isSecondary)) return { status: 'accepted', acceptedRelays, errors };
 
-    // Nobody accepted. If any relay merely went quiet, the event may still have
-    // landed there, so the honest answer is "unknown".
-    const status = results.some((result) => result.indefinite) ? 'ambiguous' : 'rejected';
-    return { status, acceptedRelays, errors };
+    // No secondary accepted. If the primary did, or any relay merely went
+    // quiet, the event may be (or is) out there, so the honest answer is
+    // "unknown" and the caller looks for it before doing anything else.
+    const unknown = acceptedRelays.length > 0 || silent.length > 0 || results.some((result) => result.indefinite);
+    return { status: unknown ? 'ambiguous' : 'rejected', acceptedRelays, errors };
   };
 }

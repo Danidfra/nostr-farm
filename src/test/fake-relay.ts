@@ -2,14 +2,24 @@ import type { NostrEvent, NostrFilter, NostrRelayCLOSED, NostrRelayEOSE, NostrRe
 import { matchFilters } from 'nostr-tools/filter';
 
 /**
- * An in-memory stand-in for the Nostrify pool as the inventory code uses it:
- * `nostr.relay(url).query(...)` and `nostr.relay(url).req(...)`.
+ * An in-memory stand-in for the Nostrify pool as the app uses it:
+ * `nostr.relay(url).req(...)` and `nostr.relay(url).event(...)`.
  *
  * One shared event store plays every relay, which is what a client that
- * deduplicates by id sees anyway. Subscriptions replay the store, emit `EOSE`,
- * then stream anything `publish`ed later. The test can hold queries back to
- * make a fetch return stale results after a live event, end subscriptions to
- * simulate `CLOSED`, or make a relay replay to simulate a reconnect.
+ * deduplicates by id sees anyway; `withhold` makes one relay lack an event.
+ * Subscriptions replay the store, emit `EOSE`, then stream anything
+ * `publish`ed later. The test can hold queries back to make a fetch return
+ * stale results after a live event, end subscriptions to simulate `CLOSED`,
+ * or make a relay replay to simulate a reconnect.
+ *
+ * The app reads in two ways through the same `req`, and the fake tells them
+ * apart the only way a relay could, by what is asked:
+ *
+ * - a `REQ` with ONE filter is a one-shot read: read until `EOSE`, then
+ *   closed. It is recorded in `queries`, obeys `holdQueries`/`failQueries`,
+ *   and is not counted as an open subscription;
+ * - a `REQ` with several filters is the live ledger tail, counted in
+ *   `subscriptions` and `openSubscriptions`.
  */
 type Message = NostrRelayEVENT | NostrRelayEOSE | NostrRelayCLOSED;
 
@@ -39,6 +49,27 @@ export class FakeRelayNetwork {
   private readonly failingRelays = new Map<string, Error>();
   /** Event ids a given relay does not hold, although the shared store does. */
   private readonly withheld = new Map<string, Set<string>>();
+  /** Every event offered to a relay through `event()`, in order, with the relay's answer. */
+  readonly offers: { relay: string; event: NostrEvent; accepted: boolean }[] = [];
+  /** Relays that answer every `EVENT` with `OK false` and this message. */
+  private readonly refusingRelays = new Map<string, string>();
+  /** Relays that never answer an `EVENT`; the publish ends only by abort. */
+  private readonly muteWriteRelays = new Set<string>();
+
+  /** Make `relay` refuse every write with `message`, as `OK false` does. */
+  refuseWrites(relay: string, message: string): void {
+    this.refusingRelays.set(relay, message);
+  }
+
+  /** Make `relay` never answer a write. */
+  ignoreWrites(relay: string): void {
+    this.muteWriteRelays.add(relay);
+  }
+
+  /** The events `relay` was offered and accepted. */
+  acceptedBy(relay: string): NostrEvent[] {
+    return this.offers.filter((offer) => offer.relay === relay && offer.accepted).map((offer) => offer.event);
+  }
 
   /** Make `relay` close every subscription before `EOSE` (after replaying what it holds). */
   closeBeforeEose(relay: string): void {
@@ -80,9 +111,66 @@ export class FakeRelayNetwork {
         if (this.gate) await this.gate.promise;
         return result;
       },
-      req: (filters: NostrFilter[], opts?: { signal?: AbortSignal }) => this.subscribe(url, filters, opts?.signal),
+      req: (filters: NostrFilter[], opts?: { signal?: AbortSignal }) =>
+        filters.length === 1 ? this.readOnce(url, filters, opts?.signal) : this.subscribe(url, filters, opts?.signal),
+      event: (event: NostrEvent, opts?: { signal?: AbortSignal }) => this.receive(url, event, opts?.signal),
     }),
   };
+
+  /** A relay receiving an `EVENT`: stores it (lifting any `withhold` of it on that relay) or refuses. */
+  private async receive(relay: string, event: NostrEvent, signal?: AbortSignal): Promise<void> {
+    if (this.muteWriteRelays.has(relay)) {
+      await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+      this.offers.push({ relay, event, accepted: false });
+      throw new DOMException('The signal has been aborted', 'AbortError');
+    }
+    const refusal = this.refusingRelays.get(relay);
+    if (refusal !== undefined) {
+      this.offers.push({ relay, event, accepted: false });
+      // Until the event exists somewhere, a relay that refused it does not have it.
+      if (!this.store.some((e) => e.id === event.id)) this.withhold(relay, event.id);
+      throw new Error(refusal);
+    }
+    this.offers.push({ relay, event, accepted: true });
+    this.withheld.get(relay)?.delete(event.id);
+    // Stored for the first time: only the relays that took it hold it.
+    if (!this.store.some((e) => e.id === event.id)) {
+      for (const [other] of this.refusingRelays) if (other !== relay) this.withhold(other, event.id);
+      this.publish(event);
+    }
+  }
+
+  /**
+   * A one-shot read: what `relay` holds for the filters, then `EOSE`, with
+   * the relay's configured misbehaviour (closing early, silence, failure).
+   */
+  private readOnce(relay: string, filters: NostrFilter[], signal?: AbortSignal): AsyncGenerator<Message> {
+    this.queries.push({ relay, filters, openSubscriptionsAtCall: this.open.size });
+    const failQueries = this.failQueries;
+    const failure = this.failingRelays.get(relay);
+    const silent = this.silentRelays.has(relay);
+    const closing = this.closingRelays.has(relay);
+    const hidden = this.withheld.get(relay);
+    // Captured now, delivered once released: a held read returns what the relay held when it was asked.
+    const result = this.matching(filters).filter((event) => !hidden?.has(event.id));
+    const gate = this.gate;
+
+    return (async function* () {
+      if (failQueries) throw failQueries;
+      if (failure) throw failure;
+      if (gate) await gate.promise;
+      if (silent) {
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) return resolve();
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        throw new DOMException('The signal has been aborted', 'AbortError');
+      }
+      for (const event of result) yield ['EVENT', 'sub', event] as NostrRelayEVENT;
+      if (closing) yield ['CLOSED', 'sub', 'closed by relay'] as NostrRelayCLOSED;
+      else yield ['EOSE', 'sub'] as NostrRelayEOSE;
+    })();
+  }
 
   /** Seed the store silently (present before any subscription opens). */
   seed(...events: NostrEvent[]): void {

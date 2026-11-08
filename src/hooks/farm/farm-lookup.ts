@@ -2,8 +2,10 @@ import type { NostrFilter } from '@nostrify/nostrify';
 
 import { KIND_MAP_STATE, KIND_WORLD_STATE } from '@/nostr/kinds';
 import { worldRef } from '@/nostr/identifiers';
+import { mergeRelayEvents } from '@/lib/relay-routing';
 import { describeReads, readFromRelays, type MultiRelayRead, type RelayPool } from '@/nostr/query';
-import { GAME_RELAYS } from '@/nostr/relays';
+import { GAME_RELAY_URLS, REQUIRED_GAME_RELAY_URLS } from '@/nostr/relays';
+import { ownEventsOfKinds, relaySync, type PublishPool } from '@/nostr/relay-sync';
 import { parseWorldState, type WorldState } from '@/nostr/world-state';
 import { parseMapState, type MapState } from '@/nostr/map-state';
 import { getMapDefinition } from '@/world/definitions/registry';
@@ -101,19 +103,31 @@ export async function lookupFarm(deps: FarmLookupDeps): Promise<FarmLookup> {
   return { status: 'found', farm: { world, map, definition } };
 }
 
+/**
+ * The newest valid world across every relay that answered.
+ *
+ * Parse first, compare second: an event that does not parse is not a world at
+ * any age and must not hide an older good one. Among the valid ones, each
+ * address keeps its NIP-01 winner (newer, then the lower id) wherever it came
+ * from, and the newest of those is the farm.
+ */
 function newestWorld(read: MultiRelayRead, ownerPubkey: string): WorldState | undefined {
-  return read.events
+  const worlds = read.events
     .filter((event) => event.pubkey === ownerPubkey)
     .map(parseWorldState)
-    .filter((w): w is WorldState => w !== null)
-    .sort((a, b) => b.event.created_at - a.event.created_at)[0];
+    .filter((w): w is WorldState => w !== null);
+  const winner = mergeRelayEvents(worlds.map((w) => w.event))[0];
+  return winner && worlds.find((w) => w.event.id === winner.id);
 }
 
 function pickMap(read: MultiRelayRead, ownerPubkey: string, world: WorldState): MapState | undefined {
-  const maps = read.events
+  const parsed = read.events
     .filter((event) => event.pubkey === ownerPubkey)
     .map(parseMapState)
     .filter((m): m is MapState => m !== null && m.worldId === world.id);
+  // One revision per map: the newest any relay returned, never the first relay's.
+  const winners = new Set(mergeRelayEvents(parsed.map((m) => m.event)).map((event) => event.id));
+  const maps = parsed.filter((m) => winners.has(m.event.id));
   return maps.find((m) => m.id === world.entryMapId) ?? maps[0];
 }
 
@@ -126,12 +140,36 @@ export const LOOKUP_TIMEOUT_MS = 5000;
 /** Pause before an empty result is re-read. */
 export const CONFIRM_ABSENCE_DELAY_MS = 2000;
 
-/** The production wiring: every configured game relay, real timeouts, a real pause. */
-export function farmLookupDeps(nostr: RelayPool, ownerPubkey: string, signal?: AbortSignal): FarmLookupDeps {
-  const relays = GAME_RELAYS.map((relay) => relay.url);
+/** A relay that is not required gets this much longer once the required ones have answered with something. */
+export const LOOKUP_GRACE_MS = 1500;
+
+/**
+ * The production wiring: every configured game relay, real timeouts, a real pause.
+ *
+ * A farm that was FOUND is not held back for a slow relay. A farm that was
+ * not found waits for every relay, because only all of them together can say
+ * there is none. After each read, a relay that finished its answer without
+ * the player's newest world or map is offered that event.
+ */
+export function farmLookupDeps(nostr: RelayPool & PublishPool, ownerPubkey: string, signal?: AbortSignal): FarmLookupDeps {
   return {
     ownerPubkey,
-    read: (filters) => readFromRelays(nostr, relays, filters, { signal, timeoutMs: LOOKUP_TIMEOUT_MS }),
+    read: async (filters) => {
+      const read = await readFromRelays(nostr, GAME_RELAY_URLS, filters, {
+        signal,
+        timeoutMs: LOOKUP_TIMEOUT_MS,
+        graceMs: LOOKUP_GRACE_MS,
+        anchors: REQUIRED_GAME_RELAY_URLS,
+      });
+      void relaySync.carryMissing(nostr, {
+        account: ownerPubkey,
+        reads: read.reads,
+        filters,
+        allows: ownEventsOfKinds(ownerPubkey, [KIND_WORLD_STATE, KIND_MAP_STATE]),
+        destinations: GAME_RELAY_URLS,
+      });
+      return read;
+    },
     wait: () =>
       new Promise((resolve, reject) => {
         if (signal?.aborted) return reject(signal.reason);

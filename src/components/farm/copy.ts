@@ -96,6 +96,24 @@ export const HUD = {
   copyKey: 'Copy your public key',
   copied: 'Copied your public key',
   copyFailed: 'Could not copy',
+  primaryRelay: 'Primary relay',
+  primarySync: {
+    idle: 'Nothing sent yet this session.',
+    synced: 'Up to date.',
+    pending: (count: number) =>
+      `No answer yet for ${count} ${count === 1 ? 'record' : 'records'}. Your farm is saved on the other relays.`,
+    refused: (count: number) =>
+      `Not accepting ${count} ${count === 1 ? 'record' : 'records'} from this account yet. Your farm is saved on the other relays.`,
+  },
+  copyRecords: {
+    label: 'Copy existing records',
+    off: 'Off. Nothing you saved before is sent anywhere; new actions are still saved to every relay.',
+    on: 'On. Records you already saved are copied to the relays below when one of them is missing a record.',
+    newRelays: 'New relays were added since you turned this on. Nothing is copied to them until you turn it on again.',
+    destinations: 'Relays that would receive copies:',
+    turnOn: 'Turn on',
+    turnOff: 'Turn off',
+  },
 } as const;
 
 export const CLEAR_ROTTEN = {
@@ -132,6 +150,12 @@ export const HARVEST_ERRORS = {
     `The relays did not finish answering about this plot, so the harvest was not started. Try again in a moment. (${detail})`,
   plotGone: 'The relays have nothing for this plot any more. Refresh to see its current state.',
   plotChanged: 'This plot was changed from another device. Refresh to see what is growing now.',
+} as const;
+
+/** Why a planting was not started. Nothing was published. */
+export const PLANT_ERRORS = {
+  plotUnconfirmed: (detail: string) =>
+    `The relays did not finish answering about this plot, so it is not known to be free and nothing was planted. Try again in a moment. (${detail})`,
 } as const;
 
 export const PRODUCE_CHANGE = {

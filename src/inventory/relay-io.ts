@@ -22,11 +22,40 @@ export interface PublishOutcome {
   errors: { relay: string; error: string }[];
 }
 
+/**
+ * What a read of several relays returned, and how far it can be trusted.
+ *
+ * A relay "answered" only by reaching `EOSE`. One that closed the
+ * subscription, timed out or failed DID NOT ANSWER; it did not answer "I have
+ * nothing". The three flags exist because three different claims rest on a
+ * read:
+ *
+ * - `answered`: something can be shown.
+ * - `anchored`: what was found may be built on. A write counts only when one
+ *   of the flow's secondary relays accepted it, so the newest state is on one
+ *   of them; a read none of them finished can be arbitrarily old.
+ * - `complete`: an EMPTY result may be believed. Only every relay together
+ *   can say an event does not exist.
+ */
 export interface InventoryReadResult {
   /** Events the relays returned for this filter, deduplicated by event id. */
   events: NostrEvent[];
-  /** True when at least one relay answered without erroring. */
+  /** At least one relay reached `EOSE`. */
   answered: boolean;
+  /** At least one relay whose acceptance makes a write count reached `EOSE`. */
+  anchored: boolean;
+  /** Every relay asked reached `EOSE`. */
+  complete: boolean;
+}
+
+/** A read every relay finished: the shape of "nothing to read", and of a test's fully answered read. */
+export function completeRead(events: NostrEvent[] = []): InventoryReadResult {
+  return { events, answered: true, anchored: true, complete: true };
+}
+
+/** A read no relay finished. */
+export function unansweredRead(): InventoryReadResult {
+  return { events: [], answered: false, anchored: false, complete: false };
 }
 
 /** An event id plus the relay hint a reference carried for it (`""` when unknown). */

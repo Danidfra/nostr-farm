@@ -11,8 +11,9 @@ import type { HarvestResult } from '@/farm/harvest/types';
 import { systemClock } from '@/farm/time';
 import { buildSlotState, collectOwnedSlots, type SlotStateEvent } from '@/nostr/slot-state';
 import { KIND_SLOT_STATE } from '@/nostr/kinds';
-import { describeReads, readFromRelays, type RelayPool } from '@/nostr/query';
-import { DEFAULT_GAME_RELAY, GAME_RELAYS } from '@/nostr/relays';
+import { allCompleteAmong, describeReads, readFromRelays, type RelayPool } from '@/nostr/query';
+import { DEFAULT_GAME_RELAY, GAME_RELAY_URLS, REQUIRED_GAME_RELAY_URLS } from '@/nostr/relays';
+import { ownEventsOfKinds, relaySync, type PublishPool } from '@/nostr/relay-sync';
 import { creditHarvest, reconcileCredit, type CreditDeps, type CreditRequest, type CreditResult } from '@/inventory/credit-harvest';
 import { FARM_INVENTORY_D, snapshotRevision, type HarvestRecord } from '@/inventory/farm-inventory';
 import { verifyCredit } from '@/inventory/verify-credit';
@@ -24,7 +25,7 @@ import { farmInventoryQueryKey, setFarmInventory } from './useFarmInventory';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
 import { useToast } from '@/hooks/useToast';
-import { ACTION_REJECTION_MESSAGES, HARVEST_ERRORS, HARVEST_TOAST, HARVEST_VERIFY } from '@/components/farm/copy';
+import { ACTION_REJECTION_MESSAGES, HARVEST_ERRORS, HARVEST_TOAST, HARVEST_VERIFY, PLANT_ERRORS } from '@/components/farm/copy';
 
 export interface FarmActionInput {
   mapId: string;
@@ -38,6 +39,14 @@ export class FarmActionRejectedError extends Error {
   constructor(readonly reason: string) {
     super(reason);
     this.name = 'FarmActionRejectedError';
+  }
+}
+
+/** A planting that was not started because the plot's state could not be confirmed. Nothing was published. */
+export class PlantRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PlantRefusedError';
   }
 }
 
@@ -61,6 +70,11 @@ export class HarvestFailedError extends Error {
  * Actions that only change world state (plant, water, clear) keep the
  * optimistic path: they are idempotent replaceable writes, so republishing one
  * twice is the same state.
+ *
+ * PLANTING additionally re-reads the plot first. It is the one action taken on
+ * what a plot does NOT hold, and "nothing there" is true only when every game
+ * relay said so; a plot one relay did not answer about is unknown, and a
+ * planting published over it would replace whatever is growing there.
  *
  * HARVEST IS DIFFERENT, because it also credits an item, and `+1` applied twice
  * is `+2`. It therefore runs credit-first and clears nothing optimistically:
@@ -181,6 +195,23 @@ export function useFarmActions({ verifyDelayMs = HARVEST_VERIFY_DELAY_MS }: { ve
       const result = applyFarmAction(record.slot, { type, nowSec: systemClock.now(), cropId }, CROP_CATALOG);
       if (!result.ok) throw new FarmActionRejectedError(result.reason);
 
+      if (type === 'plant') {
+        // Planting acts on absence, so the absence is confirmed on the relays
+        // first and the planting is recomputed on what they hold.
+        const slotD = slotKey(mapId, record.slot.coord.x, record.slot.coord.y);
+        const plot = await readPlotNow(nostr, user.pubkey, mapId, slotD);
+        if (plot.newest ? !plot.current : !plot.allComplete) {
+          throw new PlantRefusedError(PLANT_ERRORS.plotUnconfirmed(plot.detail));
+        }
+        const planted = applyFarmAction(plot.newest?.slot ?? record.slot, { type, nowSec: systemClock.now(), cropId }, CROP_CATALOG);
+        if (!planted.ok) {
+          queryClient.invalidateQueries({ queryKey: ['farm-slots', user.pubkey, mapId] });
+          throw new FarmActionRejectedError(planted.reason);
+        }
+        await publishEvent(buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: planted.slot }));
+        return { slot: planted.slot };
+      }
+
       if (type !== 'harvest' || !result.harvest) {
         await publishEvent(buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: result.slot }));
         return { slot: result.slot, harvest: result.harvest };
@@ -215,9 +246,9 @@ export function useFarmActions({ verifyDelayMs = HARVEST_VERIFY_DELAY_MS }: { ve
       // device is honoured, a plot that moved on to another planting (or to
       // nothing) is refused, and a read that did not finish is refused too.
       const plot = await readPlotNow(nostr, user.pubkey, mapId, planting.slotD);
-      if (!plot.newest || !plot.complete) {
+      if (!plot.newest || !plot.current) {
         throw new HarvestFailedError(
-          plot.newest ? HARVEST_ERRORS.plotUnconfirmed(plot.detail) : plot.complete ? HARVEST_ERRORS.plotGone : HARVEST_ERRORS.plotUnconfirmed(plot.detail),
+          plot.newest ? HARVEST_ERRORS.plotUnconfirmed(plot.detail) : plot.allComplete ? HARVEST_ERRORS.plotGone : HARVEST_ERRORS.plotUnconfirmed(plot.detail),
           'inventory',
           false
         );
@@ -410,28 +441,53 @@ export function forgetObservedRevisions(): void {
 }
 
 const PLOT_READ_TIMEOUT_MS = 5000;
+/** Once the required relays have answered with the plot, the others get this much longer. */
+const PLOT_READ_GRACE_MS = 1500;
 
 /**
- * The plot as the game relays hold it right now, for a harvest.
+ * The plot as the game relays hold it right now, for a harvest or a planting.
  *
- * `complete` means at least one relay reached EOSE, so `newest` is that
- * relay's current state for the plot rather than whatever arrived before the
- * stream was cut. Presence without completeness is not enough to credit on.
+ * Every game relay is asked and the newest revision any of them returned is
+ * `newest`, wherever it came from.
+ *
+ * `current` means every REQUIRED relay reached EOSE. A write succeeds only
+ * when a required relay accepted it, so the newest state of the plot is on
+ * one of them: with all of them heard, `newest` is the plot as it stands.
+ * Without that, `newest` is only what some other relay happened to hold, and
+ * is not enough to credit or to plant on.
+ *
+ * `allComplete` means EVERY relay reached EOSE. Only then does a missing
+ * `newest` mean the plot has never been written.
+ *
+ * Afterwards a relay that finished its answer without that newest revision is
+ * offered it.
  */
 async function readPlotNow(
-  nostr: RelayPool,
+  nostr: RelayPool & PublishPool,
   ownerPubkey: string,
   mapId: string,
   slotD: string
-): Promise<{ newest?: SlotStateEvent; complete: boolean; detail: string }> {
-  const read = await readFromRelays(
-    nostr,
-    GAME_RELAYS.map((relay) => relay.url),
-    [{ kinds: [KIND_SLOT_STATE], authors: [ownerPubkey], '#d': [slotD] }],
-    { timeoutMs: PLOT_READ_TIMEOUT_MS }
-  );
+): Promise<{ newest?: SlotStateEvent; current: boolean; allComplete: boolean; detail: string }> {
+  const filters = [{ kinds: [KIND_SLOT_STATE], authors: [ownerPubkey], '#d': [slotD] }];
+  const read = await readFromRelays(nostr, GAME_RELAY_URLS, filters, {
+    timeoutMs: PLOT_READ_TIMEOUT_MS,
+    graceMs: PLOT_READ_GRACE_MS,
+    anchors: REQUIRED_GAME_RELAY_URLS,
+  });
+  void relaySync.carryMissing(nostr, {
+    account: ownerPubkey,
+    reads: read.reads,
+    filters,
+    allows: ownEventsOfKinds(ownerPubkey, [KIND_SLOT_STATE]),
+    destinations: GAME_RELAY_URLS,
+  });
   const newest = collectOwnedSlots(read.events, ownerPubkey, mapId).get(slotD);
-  return { ...(newest ? { newest } : {}), complete: read.anyComplete, detail: describeReads(read.reads) };
+  return {
+    ...(newest ? { newest } : {}),
+    current: allCompleteAmong(read, REQUIRED_GAME_RELAY_URLS),
+    allComplete: read.allComplete,
+    detail: describeReads(read.reads),
+  };
 }
 
 async function runCredit(deps: CreditDeps, lockKey: string, identity: CreditIdentity): Promise<CreditResult> {

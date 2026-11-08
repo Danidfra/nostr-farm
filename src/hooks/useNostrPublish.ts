@@ -4,6 +4,7 @@ import { useMutation, type UseMutationResult } from "@tanstack/react-query";
 import { useCurrentUser } from "./useCurrentUser";
 import { publishToRelays } from "@/nostr/publish";
 import { GAME_RELAYS } from "@/nostr/relays";
+import { relaySync } from "@/nostr/relay-sync";
 
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -62,8 +63,12 @@ export function useNostrPublish(): UseMutationResult<NostrEvent, Error, Partial<
         created_at: finalTimestamp,
       });
 
-      // Publish to configured relays with detailed error handling
-      const publishResult = await publishToRelays(nostr, event, GAME_RELAYS);
+      // Publish to configured relays with detailed error handling. Each
+      // relay's verdict goes to the sync ledger as it arrives, including a
+      // primary relay that answers after this call has already returned.
+      const publishResult = await publishToRelays(nostr, event, GAME_RELAYS, {
+        onDelivery: (published, result) => relaySync.recordDeliveries(published, [result]),
+      });
 
       // Store publish metadata for logging (but return event for backward compatibility)
       if (process.env.NODE_ENV === 'development') {

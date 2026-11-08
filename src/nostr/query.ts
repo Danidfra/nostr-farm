@@ -80,6 +80,21 @@ export interface ReadFromRelaysOptions {
   signal?: AbortSignal;
   /** Each relay gets this long to reach `EOSE`. */
   timeoutMs: number;
+  /**
+   * Do not hold an answer back for a slow relay: once the `anchors` have
+   * settled and something was found, the relays still silent get only this
+   * much longer, then are cut off as `timeout`. Unset, every relay gets its
+   * full `timeoutMs`.
+   *
+   * An EMPTY answer is never cut short this way unless `graceOnEmpty` says
+   * so: "nothing there" is believable only when every relay said it, so that
+   * claim waits for every relay.
+   */
+  graceMs?: number;
+  /** The relays that must have settled before the grace period starts. Default: any one relay that reached `EOSE`. */
+  anchors?: readonly string[];
+  /** Start the grace period even when nothing was found. Only for reads where an empty result decides nothing. */
+  graceOnEmpty?: boolean;
 }
 
 /**
@@ -95,13 +110,34 @@ export async function readFromRelays(
   filters: NostrFilter[],
   options: ReadFromRelaysOptions
 ): Promise<MultiRelayRead> {
+  const settled = new Map<string, RelayRead>();
+  const cutters: AbortController[] = [];
+  let grace: ReturnType<typeof setTimeout> | undefined;
+
+  const maybeStartGrace = () => {
+    if (options.graceMs === undefined || grace !== undefined || settled.size === relays.length) return;
+    const completed = [...settled.values()].filter((read) => read.outcome === 'complete');
+    const anchored = options.anchors ? options.anchors.every((url) => settled.has(url)) : completed.length > 0;
+    if (!anchored) return;
+    if (!options.graceOnEmpty && !completed.some((read) => read.events.length > 0)) return;
+    grace = setTimeout(() => {
+      for (const cutter of cutters) cutter.abort(new DOMException('The relay did not answer in time', 'AbortError'));
+    }, options.graceMs);
+  };
+
   const reads = await Promise.all(
-    relays.map((url) => {
-      const timeout = AbortSignal.timeout(options.timeoutMs);
-      const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
-      return readUntilEose(nostr.relay(url), url, filters, signal);
+    relays.map(async (url) => {
+      const cutter = new AbortController();
+      cutters.push(cutter);
+      const signals = [AbortSignal.timeout(options.timeoutMs), cutter.signal];
+      if (options.signal) signals.push(options.signal);
+      const read = await readUntilEose(nostr.relay(url), url, filters, AbortSignal.any(signals));
+      settled.set(url, read);
+      maybeStartGrace();
+      return read;
     })
   );
+  clearTimeout(grace);
 
   const seen = new Set<string>();
   const events: NostrEvent[] = [];
@@ -115,6 +151,16 @@ export async function readFromRelays(
 
   const complete = reads.filter((read) => read.outcome === 'complete').length;
   return { events, reads, allComplete: reads.length > 0 && complete === reads.length, anyComplete: complete > 0 };
+}
+
+/** Whether at least one of `relays` reached `EOSE` in this read. */
+export function anyCompleteAmong(read: MultiRelayRead, relays: readonly string[]): boolean {
+  return read.reads.some((entry) => entry.outcome === 'complete' && relays.includes(entry.relay));
+}
+
+/** Whether every one of `relays` reached `EOSE` in this read. */
+export function allCompleteAmong(read: MultiRelayRead, relays: readonly string[]): boolean {
+  return relays.length > 0 && relays.every((url) => read.reads.some((entry) => entry.relay === url && entry.outcome === 'complete'));
 }
 
 /** One line per relay, for an error disclosure: `wss://relay.example: closed (auth-required)`. */

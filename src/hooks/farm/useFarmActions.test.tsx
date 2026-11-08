@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { NostrEvent } from '@nostrify/nostrify';
+import type { NostrEvent, NostrFilter } from '@nostrify/nostrify';
 
 import { plantSeed, waterPlant } from '@/farm/growth/evaluate';
 import { CROP_CATALOG } from '@/farm/crops/catalog';
@@ -11,6 +11,7 @@ import { INVENTORY_KINDS, KIND_GAME_INVENTORY } from '@/inventory/package';
 import { PRODUCE_CATALOG } from '@/inventory/produce-catalog';
 import { eventId, foldEvent, foldRefs, foldTag, snapshotEvent, spendEvent } from '@/test/inventory-fixtures';
 import { buildSlotState } from '@/nostr/slot-state';
+import { KIND_SLOT_STATE } from '@/nostr/kinds';
 import { reqOverStore } from '@/test/fake-relay';
 
 const OWNER = 'a'.repeat(64);
@@ -88,13 +89,19 @@ vi.mock('@nostrify/react', () => ({
   useNostr: () => ({
     nostr: {
       relay: () => ({
-        req: reqOverStore(() => slotStore, () => ({ eose: slotReadEose })),
-        query: async ([filter]: { kinds?: number[]; ids?: string[] }[]) => {
-          const kind = filter.kinds?.[0];
-          if (inventoryReadFails) throw new Error('relay down');
-          const source =
-            kind === INVENTORY_KINDS.spend ? spendStore : kind === INVENTORY_KINDS.fold ? foldStore : inventoryStore;
-          return source.filter((event) => !filter.ids || filter.ids.includes(event.id));
+        // Every read is a REQ read until EOSE. Plot reads and ledger reads
+        // fail independently, the way the scenarios need them to.
+        req: (filters: NostrFilter[], opts?: { signal?: AbortSignal }) => {
+          if (filters[0].kinds?.[0] === KIND_SLOT_STATE) {
+            return reqOverStore(() => slotStore, () => ({ eose: slotReadEose }))(filters, opts);
+          }
+          if (inventoryReadFails) {
+            return (async function* (): AsyncGenerator<never> {
+              yield* [];
+              throw new Error('relay down');
+            })();
+          }
+          return reqOverStore(() => [...inventoryStore, ...foldStore, ...spendStore])(filters, opts);
         },
         event: async (event: NostrEvent) => {
           // Manifests are published to the same relays through the same path;
@@ -110,6 +117,8 @@ vi.mock('@nostrify/react', () => ({
           const store = (e: NostrEvent) => {
             if (!inventoryStore.some((existing) => existing.id === e.id)) inventoryStore.push(e);
           };
+          // The scenario decides the outcome once per event, not once per relay.
+          if (inventoryStore.some((existing) => existing.id === event.id)) return;
           if (inventoryPublishOutcome === 'accepted') {
             store(event);
             const meanwhile = afterCreditLands;
@@ -362,6 +371,42 @@ describe('non-harvest actions still work', () => {
     expect(slotPublishes).toHaveLength(1);
     expect(inventoryStore).toHaveLength(0);
     await waitFor(() => expect(toasts.some((t) => t.title?.startsWith('+1'))).toBe(false));
+  });
+});
+
+describe('planting acts on absence, so the absence is confirmed first', () => {
+  const empty: FarmSlot = { coord: { x: 2, y: 2 }, content: { type: 'empty' } };
+
+  it('refuses to plant, and publishes nothing, when a relay did not finish answering about the plot', async () => {
+    // The plot looks bare on this device, but the relays closed the read
+    // before EOSE: "nothing arrived" is not "nothing is planted there".
+    slotReadEose = false;
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    await expect(result.current.act({ mapId: MAP, record: { slot: empty }, type: 'plant', cropId: 'carrot' })).rejects.toThrow(
+      /not known to be free/
+    );
+
+    expect(slotPublishes).toHaveLength(0);
+  });
+
+  it('refuses to plant over a crop the relays hold, even though this device shows the plot as bare', async () => {
+    // Another device (or another relay this device had not read) planted here.
+    onRelay({ coord: empty.coord, content: { type: 'plant', plant: plantSeed('strawberry', systemClock.now() - 50) } }, 'd'.repeat(64));
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    await expect(result.current.act({ mapId: MAP, record: { slot: empty }, type: 'plant', cropId: 'carrot' })).rejects.toThrow();
+
+    expect(slotPublishes).toHaveLength(0);
+  });
+
+  it('plants on a plot every relay confirmed bare', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    await result.current.act({ mapId: MAP, record: { slot: empty }, type: 'plant', cropId: 'carrot' });
+
+    expect(slotPublishes).toHaveLength(1);
+    expect(slotPublishes[0].tags).toContainEqual(['type', 'plant']);
   });
 });
 

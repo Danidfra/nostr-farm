@@ -22,12 +22,14 @@ import { GameDialog } from '@/components/game/GameDialog';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useLoggedInAccounts } from '@/hooks/useLoggedInAccounts';
 import { useLoginActions } from '@/hooks/useLoginActions';
+import { useRelaySyncConsent, useRelaySyncStatus } from '@/hooks/useRelaySyncStatus';
 import { useTheme } from '@/hooks/useTheme';
 import { useToast } from '@/hooks/useToast';
 import type { Theme } from '@/contexts/AppContext';
 import { ITEM_REGISTRY_ROUTE } from '@/inventory/routes';
 import { abbreviate, safeNpub } from '@/inventory/issuer';
 import { genUserName } from '@/lib/genUserName';
+import type { PrimarySyncStatus } from '@/nostr/relay-sync';
 import { formatRenderpackRef, type RenderpackRef } from '@/world/renderpack/registry';
 import { HUD } from './copy';
 
@@ -160,7 +162,7 @@ export function PlayerMenu({ about }: { about?: AboutFarm }) {
 
       <LoginDialog isOpen={loginOpen} onClose={() => setLoginOpen(false)} onLogin={() => setLoginOpen(false)} />
 
-      {about && <AboutFarmDialog open={aboutOpen} onOpenChange={setAboutOpen} about={about} npub={npub} />}
+      {about && <AboutFarmDialog open={aboutOpen} onOpenChange={setAboutOpen} about={about} npub={npub} pubkey={user.pubkey} />}
     </>
   );
 }
@@ -170,13 +172,17 @@ function AboutFarmDialog({
   onOpenChange,
   about,
   npub,
+  pubkey,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   about: AboutFarm;
   npub: string | null;
+  pubkey: string;
 }) {
   const { toast } = useToast();
+  const primarySync = useRelaySyncStatus();
+  const copyRecords = useRelaySyncConsent(pubkey);
 
   const copyNpub = async () => {
     if (!npub) return;
@@ -192,6 +198,7 @@ function AboutFarmDialog({
     { label: 'Farm', value: about.farmName },
     { label: 'Field', value: `${about.mapName} (${about.mapDefinitionId}, revision ${about.mapRevision})` },
     { label: 'Artwork', value: formatRenderpackRef(about.renderpack) },
+    { label: HUD.primaryRelay, value: describePrimarySync(primarySync) },
   ];
 
   return (
@@ -203,6 +210,32 @@ function AboutFarmDialog({
             <dd className="break-words font-medium">{row.value}</dd>
           </div>
         ))}
+        {/* Off until this account turns it on; the relays that would receive copies are listed before it does. */}
+        <div className="grid grid-cols-[6rem_minmax(0,1fr)] gap-2">
+          <dt className="text-muted-foreground">{HUD.copyRecords.label}</dt>
+          <dd className="grid gap-1.5">
+            <p className="font-medium">{copyRecords.enabled ? HUD.copyRecords.on : HUD.copyRecords.off}</p>
+            {copyRecords.uncovered.length > 0 && <p className="text-muted-foreground">{HUD.copyRecords.newRelays}</p>}
+            <p className="text-muted-foreground">{HUD.copyRecords.destinations}</p>
+            <ul className="grid gap-0.5">
+              {copyRecords.destinations.map((relay) => (
+                <li key={relay}>
+                  <code className="break-all rounded bg-muted px-1.5 py-0.5 text-xs">{relay}</code>
+                </li>
+              ))}
+            </ul>
+            <div>
+              <Button
+                variant="outline"
+                size="sm"
+                aria-pressed={copyRecords.enabled}
+                onClick={copyRecords.enabled ? copyRecords.disable : copyRecords.enable}
+              >
+                {copyRecords.enabled ? HUD.copyRecords.turnOff : HUD.copyRecords.turnOn}
+              </Button>
+            </div>
+          </dd>
+        </div>
         {npub && (
           <div className="grid grid-cols-[6rem_minmax(0,1fr)] gap-2">
             <dt className="text-muted-foreground">Your key</dt>
@@ -217,4 +250,14 @@ function AboutFarmDialog({
       </dl>
     </GameDialog>
   );
+}
+
+/**
+ * The primary relay's standing, in a sentence. A relay that refused or has
+ * not answered never fails an action, so the About dialog is where it shows.
+ */
+function describePrimarySync(status: PrimarySyncStatus): string {
+  if (status.state === 'pending') return HUD.primarySync.pending(status.pending);
+  if (status.state === 'refused') return HUD.primarySync.refused(status.refused);
+  return HUD.primarySync[status.state];
 }

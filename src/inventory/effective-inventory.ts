@@ -7,7 +7,7 @@ import {
   type GameInventoryFoldProblem,
   type GameInventoryFoldResolution,
 } from './package';
-import { dedupeEventsById, type EventReference, type InventoryReadResult } from './relay-io';
+import { completeRead, dedupeEventsById, type EventReference, type InventoryReadResult } from './relay-io';
 
 /**
  * The Farm's EFFECTIVE inventory: what the player actually holds once the
@@ -201,7 +201,7 @@ export async function loadFarmInventoryState(
 ): Promise<FarmInventoryLoad> {
   const [spends, folds] = await Promise.all([
     deps.readSpends(),
-    snapshot.fold ? deps.readFolds() : Promise.resolve<InventoryReadResult>({ events: [], answered: true }),
+    snapshot.fold ? deps.readFolds() : Promise.resolve<InventoryReadResult>(completeRead()),
   ]);
   if (!spends.answered) return { status: 'error', error: 'No relay answered when reading spends against your inventory.' };
   if (!folds.answered) return { status: 'error', error: 'No relay answered when reading your inventory settlement records.' };

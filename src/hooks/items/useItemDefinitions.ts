@@ -1,13 +1,18 @@
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { useNostr } from '@nostrify/react';
-import type { NostrEvent } from '@nostrify/nostrify';
+import type { NostrEvent, NostrFilter } from '@nostrify/nostrify';
 
 import {
+  KIND_GAME_ITEM_DEFINITION,
   buildGameItemDefinitionFilter,
   parseGameItemDefinitionResult,
   type GameItemDefinition,
 } from '@/inventory/package';
-import { FARM_OFFICIAL_ISSUER_PUBKEY, ITEM_REGISTRY_RELAYS } from '@/inventory/constants';
+import { FARM_OFFICIAL_ISSUER_PUBKEY, ITEM_REGISTRY_RELAYS, ITEM_REGISTRY_SECONDARY_RELAYS } from '@/inventory/constants';
+import { useCurrentUser } from '@/hooks/useCurrentUser';
+import { describeReads, readFromRelays, type RelayRead } from '@/nostr/query';
+import { PRIMARY_RELAY_URL } from '@/nostr/relays';
+import { relaySync, type PublishPool } from '@/nostr/relay-sync';
 
 /** How the registry scopes its relay query. */
 export type RegistryScope = 'farm' | 'all';
@@ -49,7 +54,49 @@ export function itemDefinitionsQueryKey(scope: RegistryScope, topics: readonly s
 }
 
 const QUERY_TIMEOUT_MS = 6000;
+/** Once the cross-client relays have answered with definitions, a relay still silent gets this much longer. */
+const QUERY_GRACE_MS = 1500;
 const QUERY_LIMIT = 500;
+
+/**
+ * One relay's read as the registry reports it. A relay that did not reach
+ * `EOSE` (closed the subscription, timed out, failed) is a failure, not an
+ * empty answer; whatever it sent before that is still kept.
+ */
+export function toRelayQueryResult(read: RelayRead): RelayQueryResult {
+  if (read.outcome === 'complete') return { relay: read.relay, events: read.events };
+  return { relay: read.relay, events: read.events, error: describeReads([read]) };
+}
+
+/**
+ * Carry official Farm item definitions to the primary relay when it certainly
+ * lacks them.
+ *
+ * Only when the signed-in account IS the Farm issuer and has turned carrying
+ * on ("About this farm"): the events are that account's own, and nobody
+ * else's session copies them. For every other account, and until that choice,
+ * reading the registry sends nothing.
+ *
+ * Deliberately one-way and one-issuer. The registry also shows items other
+ * people signed (`all` scope); those are theirs to publish where they choose,
+ * and this app does not copy them anywhere. Nor does it push anything to the
+ * public cross-client relays: only the Farm's own issuer, only toward the
+ * primary relay, which accepts recognised issuers only.
+ */
+export function carryOfficialDefinitions(
+  nostr: PublishPool,
+  account: string | undefined,
+  reads: readonly RelayRead[],
+  filters: readonly NostrFilter[]
+): void {
+  void relaySync.carryMissing(nostr, {
+    account,
+    reads,
+    filters,
+    allows: (event) => event.kind === KIND_GAME_ITEM_DEFINITION && event.pubkey === FARM_OFFICIAL_ISSUER_PUBKEY,
+    destinations: [PRIMARY_RELAY_URL],
+  });
+}
 
 /**
  * Reduce per-relay results to the newest VALID event per address.
@@ -175,6 +222,7 @@ export function mergeNewestRecords(
  */
 export function useItemDefinitions(scope: RegistryScope, topics: readonly string[] = []) {
   const { nostr } = useNostr();
+  const { user } = useCurrentUser();
   const queryClient = useQueryClient();
 
   return useQuery<ItemDefinitionRecord[]>({
@@ -192,19 +240,18 @@ export function useItemDefinitions(scope: RegistryScope, topics: readonly string
         limit: QUERY_LIMIT,
       };
 
-      const timeout = AbortSignal.any([signal, AbortSignal.timeout(QUERY_TIMEOUT_MS)]);
-
-      const results = await Promise.all(
-        ITEM_REGISTRY_RELAYS.map(async (relay): Promise<RelayQueryResult> => {
-          try {
-            return { relay, events: await nostr.relay(relay).query([filter], { signal: timeout }) };
-          } catch (error) {
-            // One unreachable relay must not empty the registry; every relay
-            // failing is an error, not an empty registry. See collectDefinitions.
-            return { relay, events: [], error: error instanceof Error ? error.message : String(error) };
-          }
-        })
-      );
+      // Every registry relay is asked and the answers merged: one unreachable
+      // relay must not empty the registry, and every relay failing is an
+      // error, not an empty registry. See collectDefinitions.
+      const filters = [filter as unknown as NostrFilter];
+      const read = await readFromRelays(nostr, ITEM_REGISTRY_RELAYS, filters, {
+        signal,
+        timeoutMs: QUERY_TIMEOUT_MS,
+        graceMs: QUERY_GRACE_MS,
+        anchors: ITEM_REGISTRY_SECONDARY_RELAYS,
+      });
+      const results = read.reads.map(toRelayQueryResult);
+      carryOfficialDefinitions(nostr, user?.pubkey, read.reads, filters);
 
       // Merged rather than replaced, so a refetch racing a just-published
       // update cannot show the stale version back to the author.

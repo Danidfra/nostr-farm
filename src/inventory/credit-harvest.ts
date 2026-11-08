@@ -163,14 +163,25 @@ async function readConfirmedBase(deps: CreditDeps): Promise<{ base: GameInventor
   if (!first.answered) return { error: 'No relay answered when reading your inventory.' };
 
   const base = selectNewestInventory(first.events, deps.ownerPubkey);
-  if (base) return { base };
+  if (base) return first.anchored ? { base } : { error: UNANCHORED_BASE };
+  // Nothing found. That is "no inventory" only if EVERY relay said so: a
+  // relay that closed, timed out or failed did not say "empty", and it may be
+  // the one holding the player's inventory.
+  if (!first.complete) return { error: UNCONFIRMED_EMPTY };
 
   const confirm = await deps.readInventory();
   if (!confirm.answered) return { error: 'No relay answered when confirming your inventory is empty.' };
 
   const confirmed = selectNewestInventory(confirm.events, deps.ownerPubkey);
-  return { base: confirmed };
+  if (confirmed) return confirm.anchored ? { base: confirmed } : { error: UNANCHORED_BASE };
+  if (!confirm.complete) return { error: UNCONFIRMED_EMPTY };
+  return { base: null };
 }
+
+const UNCONFIRMED_EMPTY =
+  'Not every relay answered when reading your inventory, so it could not be confirmed that you have none. Nothing was changed; try again in a moment.';
+const UNANCHORED_BASE =
+  'The relays your inventory is saved on did not answer, so the copy that was found may be out of date. Nothing was changed; try again in a moment.';
 
 /**
  * Credit one unit of produce for one harvested plant.

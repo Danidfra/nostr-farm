@@ -1,3 +1,5 @@
+import { withPrimaryRelay } from '@/lib/relay-routing';
+
 /**
  * Farm-specific facts about item definitions.
  *
@@ -29,14 +31,25 @@ export const FARM_OFFICIAL_ISSUER_PUBKEY =
   'f47aaf2e3279fe6fcdde556336d1f740705126c9a37e6390e2ede21165199fb4' as const;
 
 /**
- * Relays the registry reads from and publishes to, in addition to whichever
- * relay the app is configured with. Item definitions have to be findable by
- * other games, so they are not confined to the Farm's own game relay.
+ * The cross-client relays item definitions and the inventory have always been
+ * published to. Item definitions have to be findable by other games, so they
+ * are not confined to the Farm's own game relay.
+ *
+ * These are also the relays whose acceptance makes an inventory write count:
+ * the primary relay's write list is a pilot allowlist, so it cannot be what a
+ * harvest depends on.
  */
-export const ITEM_REGISTRY_RELAYS: readonly string[] = Object.freeze([
+export const ITEM_REGISTRY_SECONDARY_RELAYS: readonly string[] = Object.freeze([
   'wss://relay.primal.net',
   'wss://relay.ditto.pub',
 ]);
+
+/**
+ * Relays the registry reads from and publishes to: the primary relay first,
+ * then the cross-client set. Reads ask all of them and merge; order carries
+ * no authority.
+ */
+export const ITEM_REGISTRY_RELAYS: readonly string[] = Object.freeze(withPrimaryRelay(ITEM_REGISTRY_SECONDARY_RELAYS));
 
 /** The `d` namespace official Farm items use: `farm:<category>:<slug>`. */
 export const FARM_ITEM_D_NAMESPACE = 'farm';

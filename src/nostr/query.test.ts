@@ -126,6 +126,47 @@ describe('readFromRelays', () => {
     expect(read.allComplete).toBe(true);
   });
 
+  it('does not hold a found event back for a silent relay once the anchors have answered', async () => {
+    const network = new FakeRelayNetwork();
+    const event = worldEvent();
+    network.seed(event);
+    network.silence(A);
+
+    const started = Date.now();
+    const read = await readFromRelays(network.pool, [A, B], [FILTER], { timeoutMs: 5000, graceMs: 20, anchors: [B] });
+
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(read.events).toEqual([event]);
+    expect(read.reads.map((r) => r.outcome)).toEqual(['timeout', 'complete']);
+    expect(read.allComplete).toBe(false);
+  });
+
+  it('waits the full timeout for every relay when nothing was found, because only all of them can say "nothing"', async () => {
+    const network = new FakeRelayNetwork();
+    network.silence(A);
+
+    const started = Date.now();
+    const read = await readFromRelays(network.pool, [A, B], [FILTER], { timeoutMs: 150, graceMs: 10, anchors: [B] });
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(140);
+    expect(read.events).toEqual([]);
+    expect(read.allComplete).toBe(false);
+  });
+
+  it('does not start the grace period on a non-anchor relay answering first', async () => {
+    const network = new FakeRelayNetwork();
+    const event = worldEvent();
+    network.seed(event);
+    network.silence(B);
+
+    const started = Date.now();
+    // A found the event at once, but B is the anchor and it is silent.
+    const read = await readFromRelays(network.pool, [A, B], [FILTER], { timeoutMs: 150, graceMs: 10, anchors: [B] });
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(140);
+    expect(read.reads.map((r) => r.outcome)).toEqual(['complete', 'timeout']);
+  });
+
   it('describes every relay outcome on one line', () => {
     const line = describeReads([
       { relay: A, outcome: 'complete', events: [] as NostrEvent[] },

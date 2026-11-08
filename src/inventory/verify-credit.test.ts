@@ -17,7 +17,7 @@ const written = snapshotEvent({
 });
 
 function relays(events: NostrEvent[], answered = true) {
-  return { ownerPubkey: OWNER, readInventory: async () => ({ events, answered }) };
+  return { ownerPubkey: OWNER, readInventory: async () => ({ events, answered, anchored: answered, complete: answered }) };
 }
 
 describe('verifyCredit', () => {

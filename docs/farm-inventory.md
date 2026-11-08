@@ -53,9 +53,23 @@ What is fetched, and from where:
   snapshot carries a fold reference, then any still-missing manifest by id,
   on the configured relays plus each relay hint the chain carries.
 
-All three go to every relay in `INVENTORY_RELAYS` (the same cross-client set the
-Item Registry publishes to) and are deduplicated by event id. This is not a
-claim of global completeness; no relay set gives that.
+All three go to every relay in `INVENTORY_RELAYS` (the primary relay, then the
+cross-client set the Item Registry publishes to) and are deduplicated by event
+id. This is not a claim of global completeness; no relay set gives that.
+
+Each relay is read until `EOSE`, and one that did not get there did not
+answer. A read reports three things (`InventoryReadResult`): `answered` (some
+relay finished), `anchored` (a relay whose acceptance makes a write count,
+primal or ditto, finished) and `complete` (all of them did). A snapshot is
+built on only when the read is `anchored`; "no inventory" is believed, and a
+first `farm:main` created, only when two reads in a row are `complete` and
+empty. The primary relay answering "nothing" while the others are silent is
+therefore a refused harvest, never a new inventory at revision 1. See
+"Relays" in `docs/state-model.md`.
+
+A publish is `accepted` when primal or ditto accepted it. The primary relay
+refusing it (the pilot write list, or `invalid:` for a snapshot above its size
+cap) leaves the harvest accepted and the primary marked as behind.
 
 ### Live: the ledger and its tail
 

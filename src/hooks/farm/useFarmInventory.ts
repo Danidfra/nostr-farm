@@ -107,7 +107,13 @@ async function fetchFarmInventoryView(nostr: NPool, ownerPubkey: string, signal:
   if (!read.answered) throw new Error('Could not reach any relay to read your produce.');
 
   const snapshot = selectNewestInventory(read.events, ownerPubkey);
-  if (!snapshot) return emptyView(ledgerFromEvents(ownerPubkey, read.events));
+  if (!snapshot) {
+    // "Nothing" from the primary relay alone is not an empty basket: it holds
+    // only what it was allowed to accept. Show empty only when every relay
+    // said so, or at least one of the relays the inventory is saved on did.
+    if (!read.complete && !read.anchored) throw new Error('The relays your produce is saved on did not answer.');
+    return emptyView(ledgerFromEvents(ownerPubkey, read.events));
+  }
 
   const loaded = await loadFarmInventoryState(deps, snapshot);
   if (loaded.status === 'error') throw new Error(loaded.error);
