@@ -208,12 +208,18 @@ export function useFarmActions({ verifyDelayMs = HARVEST_VERIFY_DELAY_MS }: { ve
           queryClient.invalidateQueries({ queryKey: ['farm-slots', user.pubkey, mapId] });
           throw new FarmActionRejectedError(planted.reason);
         }
-        await publishEvent(buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: planted.slot }));
+        await publishEvent({
+          ...buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: planted.slot }),
+          ...(plot.newest ? { replaces: plot.newest.event } : {}),
+        });
         return { slot: planted.slot };
       }
 
       if (type !== 'harvest' || !result.harvest) {
-        await publishEvent(buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: result.slot }));
+        await publishEvent({
+          ...buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: result.slot }),
+          ...(record.sourceCreatedAt !== undefined ? { replaces: { created_at: record.sourceCreatedAt } } : {}),
+        });
         return { slot: result.slot, harvest: result.harvest };
       }
 
@@ -298,7 +304,10 @@ export function useFarmActions({ verifyDelayMs = HARVEST_VERIFY_DELAY_MS }: { ve
 
       // Only now is it safe to remove the crop.
       try {
-        await publishEvent(buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: harvested.slot }));
+        await publishEvent({
+          ...buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: harvested.slot }),
+          replaces: plot.newest.event,
+        });
       } catch (error) {
         throw new HarvestFailedError(
           `Your ${produce.name} was added, but clearing the crop failed. Harvest it again to finish — it will not be counted twice. (${error instanceof Error ? error.message : String(error)})`,

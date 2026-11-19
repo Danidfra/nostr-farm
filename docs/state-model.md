@@ -6,6 +6,16 @@ gone" below.
 All three kinds are addressable (NIP-01 30000–39999), so the relay keeps the
 newest event per `(pubkey, kind, d)` on its own.
 
+A write is stamped strictly after the event it replaces, so a plant and a
+water in the same second do not tie (`src/nostr/created-at.ts`, applied in
+`useNostrPublish`): `created_at = max(now, previous + 1)`, where `previous` is
+the later of what the caller last read and what this session last stamped at
+that address. The step is bounded: a stamp is never more than 60 s ahead of
+the device clock, so rapid writes cannot drift the clock or reach the relays'
+future limit. A previous event dated further ahead than that (a device with a
+fast clock wrote it) is not chased; it keeps winning until its time has
+passed.
+
 ## WorldState — kind 31415
 
 The root of one player's world.

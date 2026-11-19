@@ -19,7 +19,7 @@ const MAP = 'farm.field';
 const PLANT_EVENT = 'c'.repeat(64);
 
 /** Events published through the SLOT path (kind 31417). */
-const slotPublishes: { kind?: number; tags?: string[][] }[] = [];
+const slotPublishes: { kind?: number; tags?: string[][]; replaces?: { created_at: number } }[] = [];
 /** What the GAME relays hold for kind:31417: seeded by `record()`, extended by every slot publish. */
 const slotStore: NostrEvent[] = [];
 let slotEvents = 0;
@@ -66,7 +66,7 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 
 vi.mock('@/hooks/useNostrPublish', () => ({
   useNostrPublish: () => ({
-    mutateAsync: async (template: { kind?: number; tags?: string[][] }) => {
+    mutateAsync: async (template: { kind?: number; tags?: string[][]; replaces?: { created_at: number } }) => {
       if (slotPublishFails) throw new Error('slot relay refused');
       slotPublishes.push(template);
       slotEvents += 1;
@@ -371,6 +371,37 @@ describe('non-harvest actions still work', () => {
     expect(slotPublishes).toHaveLength(1);
     expect(inventoryStore).toHaveLength(0);
     await waitFor(() => expect(toasts.some((t) => t.title?.startsWith('+1'))).toBe(false));
+  });
+});
+
+describe('slot writes name the event they replace, so the publish can stamp after it', () => {
+  it('a watering names the plot event it was computed from', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+    const dry: FarmSlot = { coord: { x: 0, y: 0 }, content: { type: 'plant', plant: plantSeed('carrot', systemClock.now()) } };
+    const createdAt = systemClock.now() + 7;
+
+    await result.current.act({ mapId: MAP, record: { slot: dry, sourceEventId: PLANT_EVENT, sourceCreatedAt: createdAt }, type: 'water' });
+
+    expect(slotPublishes[0].replaces).toEqual({ created_at: createdAt });
+  });
+
+  it('a planting names the bare plot event the relays hold', async () => {
+    const bare = onRelay({ coord: { x: 3, y: 3 }, content: { type: 'empty' } }, 'b'.repeat(64), systemClock.now());
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    await result.current.act({ mapId: MAP, record: { slot: { coord: { x: 3, y: 3 }, content: { type: 'empty' } } }, type: 'plant', cropId: 'carrot' });
+
+    expect(slotPublishes[0].replaces?.created_at).toBe(bare.created_at);
+  });
+
+  it('the clear after a harvest names the plant event it re-read', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+    const ripe = record(readyCarrot());
+    const onRelays = slotStore.find((event) => event.id === PLANT_EVENT)!;
+
+    await result.current.act({ mapId: MAP, record: ripe, type: 'harvest' });
+
+    expect(slotPublishes[0].replaces?.created_at).toBe(onRelays.created_at);
   });
 });
 
