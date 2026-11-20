@@ -1,3 +1,5 @@
+import { isAddressableKind, isReplaceableKind as isNip01ReplaceableKind } from '@/lib/relay-routing';
+
 /**
  * `created_at` for replaceable and addressable writes.
  *
@@ -59,15 +61,14 @@ export function stampAfter(
 
 /** NIP-01 replaceable (0, 3, 10000–19999) or addressable (30000–39999). */
 export function isReplaceableKind(kind: number): boolean {
-  return kind === 0 || kind === 3 || (kind >= 10000 && kind < 20000) || (kind >= 30000 && kind < 40000);
+  return isNip01ReplaceableKind(kind) || isAddressableKind(kind);
 }
 
 /** The address a relay replaces this event at, or `undefined` for a regular event. */
 export function replaceableAddress(kind: number, pubkey: string, tags: readonly string[][]): string | undefined {
-  if (!isReplaceableKind(kind)) return undefined;
-  if (kind < 30000) return `${kind}:${pubkey}`;
-  const d = tags.find(([name]) => name === 'd')?.[1] ?? '';
-  return `${kind}:${pubkey}:${d}`;
+  if (isAddressableKind(kind)) return `${kind}:${pubkey}:${tags.find(([name]) => name === 'd')?.[1] ?? ''}`;
+  if (isNip01ReplaceableKind(kind)) return `${kind}:${pubkey}`;
+  return undefined;
 }
 
 /**
