@@ -195,3 +195,46 @@ describe('a refetch cannot revert a just-published update', () => {
     expect(new Set(merged.map((record) => record.address)).size).toBe(1);
   });
 });
+
+describe('equal created_at: the NIP-01 tie-break, not relay answer order', () => {
+  // Two revisions of one definition stamped in the same second. Relays keep
+  // the one with the lower id; so must every view of the registry.
+  const base = definition('farm:produce:carrot', 1_700_000_000);
+  const low: NostrEvent = { ...base, id: '1'.repeat(64), tags: [['d', 'farm:produce:carrot'], ['name', 'Low'], ['type', 'consumable']] };
+  const high: NostrEvent = { ...base, id: 'f'.repeat(64), tags: [['d', 'farm:produce:carrot'], ['name', 'High'], ['type', 'consumable']] };
+
+  it('keeps the lower id whichever relay answered first', () => {
+    for (const results of [
+      [ok('wss://a', [low]), ok('wss://b', [high])],
+      [ok('wss://a', [high]), ok('wss://b', [low])],
+      [ok('wss://a', [high, low])],
+    ]) {
+      const items = collectDefinitions(results);
+      expect(items).toHaveLength(1);
+      expect(items[0].event.id).toBe(low.id);
+    }
+  });
+
+  it('merges a refetch onto the cache by the same rule', () => {
+    expect(mergeNewestRecords([recordFor(high)], [recordFor(low)])[0].event.id).toBe(low.id);
+    expect(mergeNewestRecords([recordFor(low)], [recordFor(high)])[0].event.id).toBe(low.id);
+  });
+
+  it('does not let a cache write replace the winner with the loser', () => {
+    const client = new QueryClient();
+    client.setQueryData(itemDefinitionsQueryKey('farm'), [recordFor(low)]);
+    upsertDefinitionRecord(client, recordFor(high));
+    expect(client.getQueryData<ItemDefinitionRecord[]>(itemDefinitionsQueryKey('farm'))![0].event.id).toBe(low.id);
+
+    client.setQueryData(itemDefinitionsQueryKey('farm'), [recordFor(high)]);
+    upsertDefinitionRecord(client, recordFor(low));
+    expect(client.getQueryData<ItemDefinitionRecord[]>(itemDefinitionsQueryKey('farm'))![0].event.id).toBe(low.id);
+  });
+
+  it('still refreshes the record of the very same event', () => {
+    const client = new QueryClient();
+    client.setQueryData(itemDefinitionsQueryKey('farm'), [{ ...recordFor(low), relays: ['wss://a'] }]);
+    upsertDefinitionRecord(client, { ...recordFor(low), relays: ['wss://a', 'wss://b'] });
+    expect(client.getQueryData<ItemDefinitionRecord[]>(itemDefinitionsQueryKey('farm'))![0].relays).toEqual(['wss://a', 'wss://b']);
+  });
+});

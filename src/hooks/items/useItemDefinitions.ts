@@ -12,6 +12,7 @@ import { FARM_OFFICIAL_ISSUER_PUBKEY, ITEM_REGISTRY_RELAYS, ITEM_REGISTRY_SECOND
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { describeReads, readFromRelays, type RelayRead } from '@/nostr/query';
 import { PRIMARY_RELAY_URL } from '@/nostr/relays';
+import { replacesEvent } from '@/lib/relay-routing';
 import { relaySync, type PublishPool } from '@/nostr/relay-sync';
 
 /** How the registry scopes its relay query. */
@@ -126,7 +127,7 @@ export function selectNewestDefinitions(
         relays: [relay],
       };
 
-      if (!existing || event.created_at > existing.event.created_at) {
+      if (!existing || replacesEvent(event, existing.event)) {
         byAddress.set(address, record);
       } else if (event.id === existing.event.id && !existing.relays.includes(relay)) {
         // The same event on another relay: record the extra source rather than
@@ -199,7 +200,7 @@ export function mergeNewestRecords(
 
   for (const record of incoming) {
     const existing = byAddress.get(record.address);
-    if (!existing || record.event.created_at > existing.event.created_at) {
+    if (!existing || replacesEvent(record.event, existing.event)) {
       byAddress.set(record.address, record);
     }
   }
@@ -270,8 +271,9 @@ export function upsertDefinitionRecord(queryClient: QueryClient, record: ItemDef
     if (!previous) return previous;
     const index = previous.findIndex((entry) => entry.address === record.address);
     if (index === -1) return [...previous, record];
-    // Never let a cache write move an address backwards in time.
-    if (previous[index].event.created_at > record.event.created_at) return previous;
+    // Never let a cache write replace the NIP-01 winner (newer, or as new
+    // with the lower id) with an event the relays would not keep.
+    if (replacesEvent(previous[index].event, record.event)) return previous;
     const next = [...previous];
     next[index] = record;
     return next;
