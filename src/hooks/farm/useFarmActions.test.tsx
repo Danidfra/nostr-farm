@@ -375,14 +375,14 @@ describe('non-harvest actions still work', () => {
 });
 
 describe('slot writes name the event they replace, so the publish can stamp after it', () => {
-  it('a watering names the plot event it was computed from', async () => {
+  it('a watering names the plot event it re-read, not the older one this device had', async () => {
     const { result } = renderHook(() => useFarmActions(), { wrapper });
     const dry: FarmSlot = { coord: { x: 0, y: 0 }, content: { type: 'plant', plant: plantSeed('carrot', systemClock.now()) } };
-    const createdAt = systemClock.now() + 7;
+    const onRelays = onRelay(dry, PLANT_EVENT, systemClock.now() + 7);
 
-    await result.current.act({ mapId: MAP, record: { slot: dry, sourceEventId: PLANT_EVENT, sourceCreatedAt: createdAt }, type: 'water' });
+    await result.current.act({ mapId: MAP, record: { slot: dry, sourceEventId: PLANT_EVENT, sourceCreatedAt: onRelays.created_at - 100 }, type: 'water' });
 
-    expect(slotPublishes[0].replaces).toEqual({ created_at: createdAt });
+    expect(slotPublishes[0].replaces?.created_at).toBe(onRelays.created_at);
   });
 
   it('a planting names the bare plot event the relays hold', async () => {
@@ -402,6 +402,71 @@ describe('slot writes name the event they replace, so the publish can stamp afte
     await result.current.act({ mapId: MAP, record: ripe, type: 'harvest' });
 
     expect(slotPublishes[0].replaces?.created_at).toBe(onRelays.created_at);
+  });
+});
+
+describe('watering and clearing re-read the plot first (F-02)', () => {
+  const coord = { x: 4, y: 4 };
+  const seedling = (plantedAt: number): FarmSlot => ({ coord, content: { type: 'plant', plant: plantSeed('carrot', plantedAt) } });
+  const rotten = (plantedAt: number): FarmSlot => {
+    const crop = CROP_CATALOG.carrot;
+    return {
+      coord,
+      content: { type: 'plant', plant: { cropId: 'carrot', plantedAt, growthSec: 0, growthUpdatedAt: plantedAt, wetUntil: systemClock.now() - crop.rotAfterDrySec - 10 } },
+    };
+  };
+
+  it('refuses to water, and publishes nothing, when a relay did not finish answering', async () => {
+    const mine = record(seedling(systemClock.now() - 60));
+    slotReadEose = false;
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    await expect(result.current.act({ mapId: MAP, record: mine, type: 'water' })).rejects.toThrow(/did not finish answering/);
+    expect(slotPublishes).toHaveLength(0);
+  });
+
+  it('refuses to water a stale copy of a planting another device has replaced', async () => {
+    // This device still shows the old seedling; meanwhile the plot was
+    // harvested and replanted elsewhere. Republishing the old copy would bring
+    // the old planting back over the new one.
+    const stale = seedling(systemClock.now() - 120);
+    onRelay(seedling(systemClock.now() - 30), PLANT_EVENT);
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    await expect(result.current.act({ mapId: MAP, record: { slot: stale, sourceEventId: PLANT_EVENT }, type: 'water' })).rejects.toThrow(
+      /changed from another device/
+    );
+    expect(slotPublishes).toHaveLength(0);
+  });
+
+  it('refuses to clear a stale rotten copy when the plot holds a newer planting', async () => {
+    const stale = rotten(systemClock.now() - 100_000);
+    onRelay(seedling(systemClock.now() - 30), PLANT_EVENT);
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    await expect(result.current.act({ mapId: MAP, record: { slot: stale, sourceEventId: PLANT_EVENT }, type: 'clear' })).rejects.toThrow(
+      /changed from another device/
+    );
+    expect(slotPublishes).toHaveLength(0);
+  });
+
+  it('refuses when every relay answered and none holds the plot', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    await expect(
+      result.current.act({ mapId: MAP, record: { slot: seedling(systemClock.now() - 60), sourceEventId: PLANT_EVENT }, type: 'water' })
+    ).rejects.toThrow(/nothing for this plot/);
+    expect(slotPublishes).toHaveLength(0);
+  });
+
+  it('waters the planting as the relays hold it', async () => {
+    const mine = record(seedling(systemClock.now() - 60));
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    await result.current.act({ mapId: MAP, record: mine, type: 'water' });
+
+    expect(slotPublishes).toHaveLength(1);
+    expect(slotPublishes[0].tags).toContainEqual(['type', 'plant']);
   });
 });
 

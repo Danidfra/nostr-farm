@@ -25,7 +25,7 @@ import { farmInventoryQueryKey, setFarmInventory } from './useFarmInventory';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
 import { useToast } from '@/hooks/useToast';
-import { ACTION_REJECTION_MESSAGES, HARVEST_ERRORS, HARVEST_TOAST, HARVEST_VERIFY, PLANT_ERRORS } from '@/components/farm/copy';
+import { ACTION_REJECTION_MESSAGES, HARVEST_ERRORS, HARVEST_TOAST, HARVEST_VERIFY, PLANT_ERRORS, TEND_ERRORS } from '@/components/farm/copy';
 
 export interface FarmActionInput {
   mapId: string;
@@ -50,6 +50,14 @@ export class PlantRefusedError extends Error {
   }
 }
 
+/** A watering or a clear that was not made because the plot's state could not be confirmed or has moved on. Nothing was published. */
+export class TendRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TendRefusedError';
+  }
+}
+
 /** A harvest that could not be completed, with the phase it stopped in. */
 export class HarvestFailedError extends Error {
   constructor(
@@ -68,13 +76,16 @@ export class HarvestFailedError extends Error {
  * Perform a farm action.
  *
  * Actions that only change world state (plant, water, clear) keep the
- * optimistic path: they are idempotent replaceable writes, so republishing one
- * twice is the same state.
+ * optimistic path in the UI: they are idempotent replaceable writes, so
+ * republishing one twice is the same state.
  *
- * PLANTING additionally re-reads the plot first. It is the one action taken on
- * what a plot does NOT hold, and "nothing there" is true only when every game
- * relay said so; a plot one relay did not answer about is unknown, and a
- * planting published over it would replace whatever is growing there.
+ * Each of them re-reads the plot first, because each republishes the whole
+ * plot. PLANTING acts on what a plot does NOT hold, and "nothing there" is
+ * true only when every game relay said so; a plot one relay did not answer
+ * about is unknown, and a planting published over it would replace whatever
+ * is growing there. WATERING and CLEARING are computed on the plot as the
+ * relays hold it and refused when it holds another planting than the one the
+ * player acted on, so a stale device cannot bring an old planting back.
  *
  * HARVEST IS DIFFERENT, because it also credits an item, and `+1` applied twice
  * is `+2`. It therefore runs credit-first and clears nothing optimistically:
@@ -216,11 +227,32 @@ export function useFarmActions({ verifyDelayMs = HARVEST_VERIFY_DELAY_MS }: { ve
       }
 
       if (type !== 'harvest' || !result.harvest) {
+        // Watering and clearing republish the WHOLE plot, so they are computed
+        // on the plot as the relays hold it now, not on this device's copy: a
+        // stale copy would bring back a planting another device has since
+        // harvested or replaced. Same rules as a harvest: the read must be
+        // current, and the planting must be the one the player acted on.
+        const slotD = slotKey(mapId, record.slot.coord.x, record.slot.coord.y);
+        const plot = await readPlotNow(nostr, user.pubkey, mapId, slotD);
+        if (!plot.newest || !plot.current) {
+          throw new TendRefusedError(
+            plot.newest || !plot.allComplete ? TEND_ERRORS.plotUnconfirmed(plot.detail) : TEND_ERRORS.plotGone
+          );
+        }
+        if (!samePlanting(plot.newest.slot, record.slot)) {
+          queryClient.invalidateQueries({ queryKey: ['farm-slots', user.pubkey, mapId] });
+          throw new TendRefusedError(TEND_ERRORS.plotChanged);
+        }
+        const tended = applyFarmAction(plot.newest.slot, { type, nowSec: systemClock.now(), cropId }, CROP_CATALOG);
+        if (!tended.ok) {
+          queryClient.invalidateQueries({ queryKey: ['farm-slots', user.pubkey, mapId] });
+          throw new FarmActionRejectedError(tended.reason);
+        }
         await publishEvent({
-          ...buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: result.slot }),
-          ...(record.sourceCreatedAt !== undefined ? { replaces: { created_at: record.sourceCreatedAt } } : {}),
+          ...buildSlotState({ mapId, ownerPubkey: user.pubkey, slot: tended.slot }),
+          replaces: plot.newest.event,
         });
-        return { slot: result.slot, harvest: result.harvest };
+        return { slot: tended.slot, harvest: tended.harvest };
       }
 
       const produce = getProduceForCrop(result.harvest.cropId);
@@ -395,6 +427,16 @@ export type HarvestVerification =
   | { status: 'lost'; reason: string };
 
 type CreditIdentity = Omit<CreditRequest, 'unconfirmedFold'>;
+
+/** Whether two views of a plot hold the same planting (same crop, same `plantedAt`). */
+function samePlanting(a: FarmSlot, b: FarmSlot): boolean {
+  return (
+    a.content.type === 'plant' &&
+    b.content.type === 'plant' &&
+    a.content.plant.cropId === b.content.plant.cropId &&
+    a.content.plant.plantedAt === b.content.plant.plantedAt
+  );
+}
 
 function guardKey(mapId: string, record: FarmSlotRecord): string {
   return `${mapId}:${record.slot.coord.x}:${record.slot.coord.y}`;

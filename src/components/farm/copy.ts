@@ -158,6 +158,14 @@ export const PLANT_ERRORS = {
     `The relays did not finish answering about this plot, so it is not known to be free and nothing was planted. Try again in a moment. (${detail})`,
 } as const;
 
+/** Why a watering or a clear was not made. Nothing was published. */
+export const TEND_ERRORS = {
+  plotUnconfirmed: (detail: string) =>
+    `The relays did not finish answering about this plot, so nothing was changed. Try again in a moment. (${detail})`,
+  plotGone: 'The relays have nothing for this plot any more. Refresh to see its current state.',
+  plotChanged: 'This plot was changed from another device. Refresh to see what is growing now.',
+} as const;
+
 export const PRODUCE_CHANGE = {
   usedElsewhere: 'Used in another Nostr game',
   usedIn: (client: string) => `Used in ${client}`,
