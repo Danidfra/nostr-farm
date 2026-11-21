@@ -197,7 +197,7 @@ export function useFarmActions({ verifyDelayMs = HARVEST_VERIFY_DELAY_MS }: { ve
     [verifyDelayMs, verifyHarvest]
   );
 
-  const mutation = useMutation<{ slot: FarmSlot; harvest?: HarvestResult; produce?: ProduceDefinition }, Error, FarmActionInput>({
+  const mutation = useMutation<FarmActionOutcome, Error, FarmActionInput>({
     mutationFn: async ({ mapId, record, type, cropId }) => {
       if (!user) throw new Error('Sign in to work your farm.');
 
@@ -348,7 +348,14 @@ export function useFarmActions({ verifyDelayMs = HARVEST_VERIFY_DELAY_MS }: { ve
         );
       }
 
-      return { slot: harvested.slot, harvest: harvested.harvest, produce };
+      return {
+        slot: harvested.slot,
+        harvest: harvested.harvest,
+        produce,
+        // An earlier attempt already credited this planting; this one only
+        // finished clearing the plot, and added nothing.
+        ...(credit.status === 'already-applied' ? { alreadyCredited: true } : {}),
+      };
     },
 
     onMutate: async ({ mapId, record, type, cropId }) => {
@@ -389,7 +396,11 @@ export function useFarmActions({ verifyDelayMs = HARVEST_VERIFY_DELAY_MS }: { ve
 
       if (data.produce) {
         queryClient.invalidateQueries({ queryKey: farmInventoryQueryKey(user.pubkey) });
-        toast({ variant: 'harvest', title: `+1 ${data.produce.emoji} ${data.produce.name}`, description: HARVEST_TOAST.description });
+        toast(
+          data.alreadyCredited
+            ? { title: `${data.produce.emoji} ${data.produce.name}`, description: HARVEST_TOAST.alreadyCredited }
+            : { variant: 'harvest', title: `+1 ${data.produce.emoji} ${data.produce.name}`, description: HARVEST_TOAST.description }
+        );
       }
     },
 
@@ -414,6 +425,16 @@ export function useFarmActions({ verifyDelayMs = HARVEST_VERIFY_DELAY_MS }: { ve
   );
 
   return { act, isActing: mutation.isPending, lastVerification };
+}
+
+/** What a farm action did. */
+export interface FarmActionOutcome {
+  slot: FarmSlot;
+  harvest?: HarvestResult;
+  /** Set for a harvest: the produce it was credited as. */
+  produce?: ProduceDefinition;
+  /** The harvest had already been credited by an earlier attempt; nothing was added this time. */
+  alreadyCredited?: boolean;
 }
 
 /** How long after an accepted credit the relays are read back. */

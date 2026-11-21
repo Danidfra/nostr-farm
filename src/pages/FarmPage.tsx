@@ -56,7 +56,8 @@ export default function FarmPage() {
   const [clearTarget, setClearTarget] = useState<FarmSlot | null>(null);
 
   // Harvest feedback on the field. A burst is added only after the mutation
-  // resolved with produce, i.e. after the inventory credit was accepted.
+  // resolved with produce, i.e. after the inventory credit was accepted, and
+  // not for a retry whose produce an earlier attempt had already added.
   const [bursts, setBursts] = useState<FieldBurst[]>([]);
   const burstTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
   useEffect(() => {
@@ -79,7 +80,7 @@ export default function FarmPage() {
       const record = readSlotRecord(slots.data, mapId, slot.coord.x, slot.coord.y);
       const result = await act({ mapId, record, type, cropId }).catch(() => undefined);
 
-      if (result?.produce) {
+      if (result?.produce && !result.alreadyCredited) {
         const burst: FieldBurst = {
           id: `${Date.now()}-${slot.coord.x}-${slot.coord.y}`,
           coord: slot.coord,

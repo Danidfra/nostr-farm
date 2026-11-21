@@ -125,6 +125,8 @@ export const CLEAR_ROTTEN = {
 
 export const HARVEST_TOAST = {
   description: 'Added to your basket.',
+  /** A retried harvest whose produce an earlier attempt had already added. */
+  alreadyCredited: 'Already in your basket from an earlier try; nothing new was added.',
 } as const;
 
 /**

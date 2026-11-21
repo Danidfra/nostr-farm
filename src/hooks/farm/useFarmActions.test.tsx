@@ -286,6 +286,34 @@ describe('harvest ordering', () => {
   });
 });
 
+describe('feedback for a harvest that was already credited (F-05)', () => {
+  it('a retry that only finishes the clear says so instead of showing +1', async () => {
+    slotPublishFails = true;
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+    const slot = readyCarrot();
+    await expect(result.current.act({ mapId: MAP, record: record(slot), type: 'harvest' })).rejects.toThrow();
+    slotPublishFails = false;
+    toasts.length = 0;
+
+    const outcome = await result.current.act({ mapId: MAP, record: record(slot), type: 'harvest' });
+
+    expect(outcome?.alreadyCredited).toBe(true);
+    expect(carrotQuantity()).toBe(1);
+    await waitFor(() => expect(toasts).toHaveLength(1));
+    expect(toasts[0].title?.startsWith('+1')).toBe(false);
+    expect((toasts[0] as { description?: string }).description).toMatch(/Already in your basket/);
+  });
+
+  it('a first harvest still shows +1', async () => {
+    const { result } = renderHook(() => useFarmActions(), { wrapper });
+
+    const outcome = await result.current.act({ mapId: MAP, record: record(readyCarrot()), type: 'harvest' });
+
+    expect(outcome?.alreadyCredited).toBeUndefined();
+    await waitFor(() => expect(toasts.some((t) => t.title?.startsWith('+1'))).toBe(true));
+  });
+});
+
 describe('harvest guards', () => {
   it('grants nothing for a crop with no official produce', async () => {
     const { result } = renderHook(() => useFarmActions(), { wrapper });
