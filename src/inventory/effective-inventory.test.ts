@@ -251,12 +251,12 @@ function network(options: {
 }) {
   const byIdCalls: EventReference[][] = [];
   const deps: FarmInventoryReadDeps = {
-    readSpends: vi.fn(async () => ({ events: options.spends ?? [], answered: options.spendsAnswered ?? true })),
-    readFolds: vi.fn(async () => ({ events: options.folds ?? [], answered: options.foldsAnswered ?? true })),
+    readSpends: vi.fn(async () => ({ events: options.spends ?? [], answered: options.spendsAnswered ?? true, anchored: options.spendsAnswered ?? true, complete: options.spendsAnswered ?? true })),
+    readFolds: vi.fn(async () => ({ events: options.folds ?? [], answered: options.foldsAnswered ?? true, anchored: options.foldsAnswered ?? true, complete: options.foldsAnswered ?? true })),
     readFoldsById: vi.fn(async (references: EventReference[]) => {
       byIdCalls.push(references);
       const ids = new Set(references.map((r) => r.eventId));
-      return { events: (options.byId ?? []).filter((e) => ids.has(e.id)), answered: true };
+      return { events: (options.byId ?? []).filter((e) => ids.has(e.id)), answered: true, anchored: true, complete: true };
     }),
   };
   return { deps, byIdCalls };

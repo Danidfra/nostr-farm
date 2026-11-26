@@ -12,6 +12,8 @@ changes. This file is the short version.
    no `@/` imports outside itself, no browser API, no `Date.now()`. Time enters
    as an explicit `nowSec` argument. — `src/farm/purity.test.ts`
 2. **No other game's vocabulary in `src/`.** — `src/farm/purity.test.ts`
+   (one exemption: `src/lib/relay-routing.ts`, the ecosystem's shared relay
+   routing module, vendored verbatim. Farm code says "the primary relay".)
 3. **Kind 14159 is dead.** It must not reappear outside the note recording that
    it is dead. — `src/nostr/world-map-state.test.ts`
 4. **`@nostr-games/inventory` may only ever be imported by

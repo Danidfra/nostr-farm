@@ -44,6 +44,21 @@ export const CREATE_FARM = {
   busy: 'Preparing your field…',
   howTitle: 'What gets saved?',
   how: 'Two signed events on the game relay: your farm and its field. Crops are saved as you plant them.',
+  failedTitle: 'Could not create farm',
+  toasts: {
+    created: { title: 'Farm created', description: 'Your field is ready.' },
+    restored: { title: 'Field restored', description: 'Your farm was already there; its field is back.' },
+    existing: { title: 'Farm found', description: 'You already have a farm, so nothing was changed.' },
+  },
+} as const;
+
+/** Shown when the farm exists on the relays but its field does not. */
+export const RESTORE_FARM = {
+  title: 'Your field is missing',
+  description: (farmName: string) =>
+    `Your farm "${farmName}" is on the relays, but its field is not. Restoring it publishes the field again and changes nothing else.`,
+  action: 'Restore field',
+  busy: 'Restoring…',
 } as const;
 
 export const LOADING = {
@@ -53,6 +68,9 @@ export const LOADING = {
 export const ERRORS = {
   farmTitle: 'We could not reach your farm',
   farmMessage: 'The relay did not answer in time. Your farm is still there; try again in a moment.',
+  farmUnknownTitle: 'We could not confirm your farm',
+  farmUnknownMessage:
+    'A relay did not finish answering, so we cannot tell whether you already have a farm. Nothing was changed; try again in a moment.',
   artworkTitle: 'The farm artwork did not load',
   artworkMessage: 'The pictures for your field could not be fetched. Check your connection and try again.',
   retry: 'Try again',
@@ -78,6 +96,24 @@ export const HUD = {
   copyKey: 'Copy your public key',
   copied: 'Copied your public key',
   copyFailed: 'Could not copy',
+  primaryRelay: 'Primary relay',
+  primarySync: {
+    idle: 'Nothing sent yet this session.',
+    synced: 'Up to date.',
+    pending: (count: number) =>
+      `No answer yet for ${count} ${count === 1 ? 'record' : 'records'}. Your farm is saved on the other relays.`,
+    refused: (count: number) =>
+      `Not accepting ${count} ${count === 1 ? 'record' : 'records'} from this account yet. Your farm is saved on the other relays.`,
+  },
+  copyRecords: {
+    label: 'Copy existing records',
+    off: 'Off. Nothing you saved before is sent anywhere; new actions are still saved to every relay.',
+    on: 'On. Records you already saved are copied to the relays below when one of them is missing a record.',
+    newRelays: 'New relays were added since you turned this on. Nothing is copied to them until you turn it on again.',
+    destinations: 'Relays that would receive copies:',
+    turnOn: 'Turn on',
+    turnOff: 'Turn off',
+  },
 } as const;
 
 export const CLEAR_ROTTEN = {
@@ -89,6 +125,47 @@ export const CLEAR_ROTTEN = {
 
 export const HARVEST_TOAST = {
   description: 'Added to your basket.',
+  /** A retried harvest whose produce an earlier attempt had already added. */
+  alreadyCredited: 'Already in your basket from an earlier try; nothing new was added.',
+} as const;
+
+/**
+ * What the verification read a few seconds after a harvest found. A confirmed
+ * harvest says nothing: the harvest toast already did.
+ */
+export const HARVEST_VERIFY = {
+  resaved: { title: 'Harvest saved again', description: 'Another device had overwritten your basket; your harvest was added back.' },
+  lost: (detail: string) => ({
+    variant: 'destructive' as const,
+    title: 'Harvest may be missing',
+    description: `Another device overwrote your basket and your harvest could not be added back: ${detail}`,
+  }),
+  uncertain: {
+    title: 'Harvest not yet confirmed',
+    description: 'The relays did not confirm your basket update. It will show once they catch up; nothing is ever counted twice.',
+  },
+} as const;
+
+/** Why a harvest was not started. The crop is always left in place. */
+export const HARVEST_ERRORS = {
+  plotUnconfirmed: (detail: string) =>
+    `The relays did not finish answering about this plot, so the harvest was not started. Try again in a moment. (${detail})`,
+  plotGone: 'The relays have nothing for this plot any more. Refresh to see its current state.',
+  plotChanged: 'This plot was changed from another device. Refresh to see what is growing now.',
+} as const;
+
+/** Why a planting was not started. Nothing was published. */
+export const PLANT_ERRORS = {
+  plotUnconfirmed: (detail: string) =>
+    `The relays did not finish answering about this plot, so it is not known to be free and nothing was planted. Try again in a moment. (${detail})`,
+} as const;
+
+/** Why a watering or a clear was not made. Nothing was published. */
+export const TEND_ERRORS = {
+  plotUnconfirmed: (detail: string) =>
+    `The relays did not finish answering about this plot, so nothing was changed. Try again in a moment. (${detail})`,
+  plotGone: 'The relays have nothing for this plot any more. Refresh to see its current state.',
+  plotChanged: 'This plot was changed from another device. Refresh to see what is growing now.',
 } as const;
 
 export const PRODUCE_CHANGE = {

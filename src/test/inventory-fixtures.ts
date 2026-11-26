@@ -24,6 +24,7 @@ export const RELAY = 'wss://relay.primal.net';
 
 export const STRAWBERRY = PRODUCE_CATALOG.strawberry;
 export const CARROT = PRODUCE_CATALOG.carrot;
+export const PUMPKIN_ADDRESS = PRODUCE_CATALOG.pumpkin.address;
 
 /** A 64-hex-looking id from a short label, sortable the way the label sorts. */
 export function eventId(label: string): string {

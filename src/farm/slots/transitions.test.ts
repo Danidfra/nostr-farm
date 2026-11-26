@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { normalizeCropDefinition } from '../crops/defaults';
 import type { CropCatalog } from '../crops/types';
 import { plantSeed, totalGrowthSec, waterPlant } from '../growth/evaluate';
-import { applyFarmAction } from './transitions';
+import { applyFarmAction, plantingTime } from './transitions';
 import { emptySlot, type FarmSlot } from './types';
 
 const CROP = normalizeCropDefinition('testcrop', {
@@ -228,5 +228,70 @@ describe('full loop', () => {
 
     // The freed slot is immediately replantable.
     expect(applyFarmAction(harvested.slot, { type: 'plant', nowSec: t, cropId: 'testcrop' }, CATALOG).ok).toBe(true);
+  });
+});
+
+describe('planting time is strictly after the last harvest of the same slot', () => {
+  it('uses the clock on a slot that was never harvested', () => {
+    expect(plantingTime(emptySlot(COORD), T0)).toBe(T0);
+    const result = applyFarmAction(emptySlot(COORD), { type: 'plant', nowSec: T0, cropId: 'testcrop' }, CATALOG);
+    if (!result.ok || result.slot.content.type !== 'plant') throw new Error('expected a plant');
+    expect(result.slot.content.plant.plantedAt).toBe(T0);
+  });
+
+  it('uses the clock when it is already past the last harvest', () => {
+    expect(plantingTime(emptySlot(COORD, T0 - 500), T0)).toBe(T0);
+  });
+
+  it('replanting in the same second as the harvest is stamped one second later', () => {
+    const harvested = applyFarmAction(ripe(), { type: 'harvest', nowSec: T0 + 900 }, CATALOG);
+    if (!harvested.ok) throw new Error('expected a harvest');
+
+    const replanted = applyFarmAction(harvested.slot, { type: 'plant', nowSec: T0 + 900, cropId: 'testcrop' }, CATALOG);
+    if (!replanted.ok || replanted.slot.content.type !== 'plant') throw new Error('expected a plant');
+
+    expect(replanted.slot.content.plant.plantedAt).toBe(T0 + 901);
+  });
+
+  it('a clock that runs behind the harvesting device still yields a later planting', () => {
+    // The harvest was stamped T0 + 900 by another device; this one thinks it is T0 + 100.
+    const slot = emptySlot(COORD, T0 + 900);
+    expect(plantingTime(slot, T0 + 100)).toBe(T0 + 901);
+
+    const result = applyFarmAction(slot, { type: 'plant', nowSec: T0 + 100, cropId: 'testcrop' }, CATALOG);
+    if (!result.ok || result.slot.content.type !== 'plant') throw new Error('expected a plant');
+    const { plant } = result.slot.content;
+    expect(plant.plantedAt).toBe(T0 + 901);
+    // The seed is coherent even though its time is "in the future" for this device.
+    expect(plant.growthUpdatedAt).toBe(plant.plantedAt);
+    expect(plant.wetUntil).toBe(plant.plantedAt);
+    expect(totalGrowthSec(plant, T0 + 100)).toBe(0);
+  });
+
+  it('two consecutive cycles of one plot never share a plantedAt', () => {
+    let slot: FarmSlot = emptySlot(COORD);
+    const seen = new Set<number>();
+    // Plant, ripen instantly (as a developer tool would), harvest, replant — all at T0.
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      const planted = applyFarmAction(slot, { type: 'plant', nowSec: T0, cropId: 'testcrop' }, CATALOG);
+      if (!planted.ok || planted.slot.content.type !== 'plant') throw new Error('expected a plant');
+      const { plantedAt } = planted.slot.content.plant;
+      expect(seen.has(plantedAt)).toBe(false);
+      seen.add(plantedAt);
+
+      const ripened: FarmSlot = {
+        coord: COORD,
+        content: { type: 'plant', plant: { ...planted.slot.content.plant, growthSec: 900, wetUntil: plantedAt + 600 } },
+      };
+      const harvested = applyFarmAction(ripened, { type: 'harvest', nowSec: Math.max(T0, plantedAt) }, CATALOG);
+      if (!harvested.ok) throw new Error('expected a harvest');
+      slot = harvested.slot;
+    }
+    expect(seen.size).toBe(5);
+  });
+
+  it('watering preserves plantedAt', () => {
+    const plant = plantSeed('testcrop', T0 + 901);
+    expect(waterPlant(plant, T0 + 950, CROP).plantedAt).toBe(T0 + 901);
   });
 });

@@ -53,9 +53,23 @@ What is fetched, and from where:
   snapshot carries a fold reference, then any still-missing manifest by id,
   on the configured relays plus each relay hint the chain carries.
 
-All three go to every relay in `INVENTORY_RELAYS` (the same cross-client set the
-Item Registry publishes to) and are deduplicated by event id. This is not a
-claim of global completeness; no relay set gives that.
+All three go to every relay in `INVENTORY_RELAYS` (the primary relay, then the
+cross-client set the Item Registry publishes to) and are deduplicated by event
+id. This is not a claim of global completeness; no relay set gives that.
+
+Each relay is read until `EOSE`, and one that did not get there did not
+answer. A read reports three things (`InventoryReadResult`): `answered` (some
+relay finished), `anchored` (a relay whose acceptance makes a write count,
+primal or ditto, finished) and `complete` (all of them did). A snapshot is
+built on only when the read is `anchored`; "no inventory" is believed, and a
+first `farm:main` created, only when two reads in a row are `complete` and
+empty. The primary relay answering "nothing" while the others are silent is
+therefore a refused harvest, never a new inventory at revision 1. See
+"Relays" in `docs/state-model.md`.
+
+A publish is `accepted` when primal or ditto accepted it. The primary relay
+refusing it (the pilot write list, or `invalid:` for a snapshot above its size
+cap) leaves the harvest accepted and the primary marked as behind.
 
 ### Live: the ledger and its tail
 
@@ -212,12 +226,110 @@ refetched from the relays; the refetch merges, it does not replace.
 
 - `revision` stays advisory and independent of folding. A folding snapshot is
   an ordinary replacement at `previous + 1`.
-- `["e", "<consumed-plant-event>", "<relay>", "farm-harvest"]` markers remain
-  the harvest idempotency mechanism. kind:1417 settles spends; it does not
-  replace this marker, and the round-trip preserves it exactly as before.
+- `["e", "<consumed-plant-event>", "<relay>", "farm-harvest"]` markers are
+  still written, for reconciling an ambiguous publish by exact id and for
+  change attribution. They are no longer what prevents a second credit; the
+  per-plot record below is. kind:1417 settles spends; it does not replace
+  either, and the round-trip preserves both.
 - Same-origin Web Lock + per-tab serialization, the confirmed empty read, the
   fresh read inside the lock, monotonic `created_at`, multi-relay publish and
   read-back reconciliation are all unchanged.
+
+## Harvest identity: the planting, not the event
+
+A credit used to be keyed on the id of the kind:31417 event being consumed.
+That id changes every time the plant is watered — one planting is E1 when
+sown, E2 after the first watering, E3 after the next — so two harvesters
+holding different versions of the same ripe plant presented different ids and
+**both credited it**. Two tabs of one browser could do it (the Web Lock
+serialises them, but the keys differ); two devices could do it with no lock
+at all.
+
+A planting is now identified by `(slot d, plantedAt)`. `plantedAt` is set
+once by `plantSeed`, carried unchanged by every transition, and kept
+strictly increasing per plot by `plantingTime` in `src/farm`
+(`max(now, lastHarvestedAt + 1)`), so two cycles of one plot never share it
+even under a developer tool that ripens instantly or a device whose clock
+runs behind.
+
+Each credit writes the plot's **record**:
+
+```text
+["harvest", "<slot d>", "<plantedAt>"]      one per plot: the newest planting credited there
+credited(d, plantedAt)  ⇔  record(d) exists  and  record(d) ≥ plantedAt
+```
+
+A planting at or below the record is the same cycle seen through another
+event, or an older cycle that resurfaced; either way it was credited, and
+the harvest path takes the existing `already-applied` branch, which clears
+the plant without crediting. Records are **never dropped because of their
+age**: the only record ever removed is the one the new credit replaces for
+the same plot. A legacy snapshot without records answers by `e` marker
+alone, exactly as before, and gains a record for each plot as it is
+harvested.
+
+Legacy `e` markers are bounded to the newest 64, with one exception: a
+marker whose event is still the current state of some plot (as the client
+last read the field) is kept whatever its age, because that event could
+still be presented for harvest. With no field in hand nothing is dropped. A
+dropped marker can only matter again if a relay loses the newer slot events
+and an old plant event resurfaces as current **and** the plot was last
+credited before records existed; from the first record onward the plot is
+covered regardless.
+
+### Before a credit: the plot and the snapshot must both be current
+
+Two reads guard every credit, and each refuses rather than guesses:
+
+- **The plot is re-read by `d` from the game relays** (`readPlotNow` in
+  `useFarmActions`). The harvest is recomputed on what comes back: a watering
+  from another device is honoured and its event is the one consumed; a plot
+  holding a different planting, or nothing, is refused with "changed from
+  another device"; a read in which no relay reached `EOSE` is refused even if
+  the plant was seen, because presence proves nothing about what replaced it.
+- **The snapshot must not be older than one this session has seen.** The
+  highest `revision` this session has read or written is remembered
+  (`knownRevisions`) and passed to `creditHarvest` as `minRevision`. A
+  confirmed read that returns a lower revision, no revision, or no snapshot
+  at all ends in `stale-read` with nothing signed: building on it would drop
+  every later harvest and could credit one again. The floor is per session;
+  a fresh page load has nothing to compare against and trusts the confirmed
+  read, which is the remaining multi-device gap (two devices never share a
+  floor, and a relay that loses the newest snapshot between two loads is not
+  detected).
+
+Neither read makes the harvest atomic. The credit and the empty-slot publish
+are still two events, and a watering from another device can still land
+between them; the per-plot record is what makes that harmless.
+
+### After a credit: one look back
+
+Three seconds after an accepted credit (`HARVEST_VERIFY_DELAY_MS`), the
+inventory is read once more (`verifyCredit`):
+
+| Relays hold | Outcome | What happens |
+| --- | --- | --- |
+| our snapshot, or a later one carrying our record | `confirmed` | nothing; the harvest toast already said so |
+| a newer snapshot without our record | `overwritten` | the credit runs **once** more under the same `(d, plantedAt)`; the record makes it a no-op if the harvest survived somewhere after all; "Harvest saved again", or "Harvest may be missing" if that run is refused |
+| nothing, an older snapshot, or no answer | `uncertain` | reported ("Harvest not yet confirmed"); never retried on no evidence |
+
+The retry never uses a new identity and never loops. The check is one read
+of the configured relays while the device is still online; it is not a
+guarantee that the snapshot is durable on every relay, and a device that
+goes offline inside those three seconds never looks at all.
+
+### Scalability limitation
+
+The record set is bounded by the number of plots ever harvested, which is 36
+on every farm that exists today (about 2 KB) and will grow with the field.
+It is **not** a design for an unbounded procedural world: at 256 plots per
+region a nine-region farm would carry up to ~110 KB of records, beyond what
+some relays accept. Before large-scale expansion ships, records have to move
+out of `farm:main` — per-region (for example on the region's own kind:31416,
+keyed by local plot) or into a folded, append-only credit log in the
+inventory protocol — and the credit path has to read the plot's record from
+wherever it lives. Until then, relay size limits must be checked against the
+largest field the client allows.
 
 ## Residual limitation
 
@@ -227,7 +339,8 @@ same-origin only. Both derive, both fold, both publish; the loser's own
 harvest is lost exactly as before this milestone. The spend protocol solves
 **cross-application debit coordination**, not distributed owner-writer
 consensus. Readers still never double-debit: whichever chain wins, each spend
-is excluded once.
+is excluded once. The loser never double-**credits** either: the record is
+keyed on the planting, so re-crediting the lost harvest is idempotent.
 
 ## Dependency
 

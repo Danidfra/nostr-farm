@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { reqOverStore } from '@/test/fake-relay';
 import { renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -45,7 +46,9 @@ const sign = async (t: { kind: number; content: string; tags: string[][]; create
   kind: t.kind,
   content: t.content,
   tags: t.tags,
-  created_at: t.created_at ?? systemClock.now(),
+  // Strictly increasing, as consecutive real writes are: a tie would be
+  // broken by event id, which is what PR 3 removes from the slot path.
+  created_at: (t.created_at ?? systemClock.now()) + signed,
   id: `${t.kind}-${++signed}`.padEnd(64, '0'),
   pubkey: OWNER,
   sig: 'x'.repeat(128),
@@ -69,11 +72,8 @@ vi.mock('@nostrify/react', () => ({
   useNostr: () => ({
     nostr: {
       relay: () => ({
-        query: async ([filter]: { kinds?: number[]; ids?: string[] }[]) => {
-          const kind = filter.kinds?.[0];
-          const source = kind === INVENTORY_KINDS.spend ? spendStore : kind === INVENTORY_KINDS.fold ? foldStore : inventoryStore;
-          return source.filter((event) => !filter.ids || filter.ids.includes(event.id));
-        },
+        // Every read is a REQ read until EOSE: plots, and the three ledger kinds.
+        req: reqOverStore(() => [...slotPublishes, ...inventoryStore, ...foldStore, ...spendStore]),
         event: async (event: NostrEvent) => {
           if (!offered.has(event.id)) {
             offered.add(event.id);
@@ -90,7 +90,7 @@ vi.mock('@nostrify/react', () => ({
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: () => undefined }) }));
 
 const { useAccelerateCrop } = await import('./useAccelerateCrop');
-const { useFarmActions } = await import('@/hooks/farm/useFarmActions');
+const { useFarmActions, forgetObservedRevisions } = await import('@/hooks/farm/useFarmActions');
 
 let client: QueryClient;
 function wrapper({ children }: { children: React.ReactNode }) {
@@ -114,6 +114,7 @@ beforeEach(() => {
   inventoryPublishes.length = 0;
   offered.clear();
   signed = 0;
+  forgetObservedRevisions();
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -165,8 +166,8 @@ describe('harvest after developer acceleration', () => {
 
     const actions = renderHook(() => useFarmActions(), { wrapper });
     await actions.result.current.act({ mapId: MAP, record, type: 'harvest' });
-    // A retry with the stale record (crop still ripe, same plant event).
-    await actions.result.current.act({ mapId: MAP, record, type: 'harvest' });
+    // A retry with the stale record: the relays now hold the empty slot, so it is refused outright.
+    await expect(actions.result.current.act({ mapId: MAP, record, type: 'harvest' })).rejects.toThrow(/another device/);
 
     expect(inventoryStore).toHaveLength(1);
     expect(strawberryQuantity()).toBe(1);

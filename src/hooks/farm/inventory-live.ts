@@ -142,7 +142,7 @@ export function startFarmInventoryLive(deps: FarmInventoryLiveDeps): FarmInvento
   const relays = deps.relays ?? INVENTORY_RELAYS;
   const key = farmInventoryQueryKey(ownerPubkey);
   const options = farmInventoryQueryOptions(nostr, queryClient, ownerPubkey);
-  const readFoldsById = readFarmFoldsById(nostr);
+  const readFoldsById = readFarmFoldsById(nostr, undefined, ownerPubkey);
 
   const abort = new AbortController();
   const self = {};

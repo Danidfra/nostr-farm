@@ -11,7 +11,7 @@ import { AppProvider } from '@/components/AppProvider';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { AppConfig } from '@/contexts/AppContext';
-import { GAME_RELAYS } from '@/nostr/relays';
+import { PROFILE_RELAY_URLS } from '@/nostr/relays';
 import { APP_CONFIG_STORAGE_KEY } from '@/lib/theme-storage';
 import AppRouter from './AppRouter';
 
@@ -30,7 +30,9 @@ const queryClient = new QueryClient({
 const defaultConfig: AppConfig = {
   theme: 'system',
   relayMetadata: {
-    relays: GAME_RELAYS.map((relay) => ({ url: relay.url, read: true, write: true })),
+    // The pool's default routing serves profile reads only; game, inventory and
+    // registry flows name their relays explicitly (`src/nostr/relays.ts`).
+    relays: PROFILE_RELAY_URLS.map((url) => ({ url, read: true, write: true })),
     updatedAt: 0,
   },
 };

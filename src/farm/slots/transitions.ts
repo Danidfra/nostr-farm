@@ -56,9 +56,27 @@ function plantAction(slot: FarmSlot, action: FarmAction, catalog: CropCatalog): 
     action: 'plant',
     slot: {
       coord: slot.coord,
-      content: { type: 'plant', plant: plantSeed(crop.id, action.nowSec) },
+      content: { type: 'plant', plant: plantSeed(crop.id, plantingTime(slot, action.nowSec)) },
     },
   };
+}
+
+/**
+ * When a seed planted "now" into this slot counts as planted.
+ *
+ * `(slot address, plantedAt)` identifies a planting cycle everywhere outside
+ * this module: it is what the inventory credits, and what keeps a second
+ * harvest of the same planting from crediting again. For that to hold, two
+ * cycles of one plot must never share a `plantedAt`. Normally they cannot —
+ * a crop needs many minutes between planting and harvest — but a developer
+ * tool can ripen a crop instantly, and a device whose clock runs behind can
+ * replant with a time that predates the previous harvest. So a planting is
+ * always stamped strictly after the plot's last harvest, whatever the clock
+ * says: `plantedAt` increases monotonically per plot.
+ */
+export function plantingTime(slot: FarmSlot, nowSec: number): number {
+  const lastHarvestedAt = slot.content.type === 'empty' ? slot.content.lastHarvestedAt : undefined;
+  return lastHarvestedAt === undefined ? nowSec : Math.max(nowSec, lastHarvestedAt + 1);
 }
 
 function waterAction(slot: FarmSlot, action: FarmAction, catalog: CropCatalog): FarmActionResult {

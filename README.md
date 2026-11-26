@@ -95,8 +95,10 @@ Ownership works like this:
 
 This is what the client accepts, not a guarantee the network makes. Relays
 store and return events; they do not enforce game rules, and no relay set
-gives a complete or globally consistent view. Game state is written to a
-single relay (`wss://relay.primal.net`, see `src/nostr/relays.ts`). There is
+gives a complete or globally consistent view. Game state goes to the primary
+relay `wss://relay.blobbi.pet` and to `wss://relay.primal.net` (see
+`src/nostr/relays.ts` and "Relays" in `docs/state-model.md`); a write counts
+once `relay.primal.net` has accepted it, and every read merges both. There is
 no relay settings UI.
 
 These kinds, and the inventory kinds below, are defined by this project and
@@ -140,10 +142,11 @@ spend carries a `client` tag the HUD shows "Used in <that name>"; that tag is
 self-declared and displayed as text only. The Farm keeps no list of consuming
 applications and never publishes a spend of its own.
 
-Inventory and item events go to `wss://relay.primal.net` and
-`wss://relay.ditto.pub` (`INVENTORY_RELAYS` in
-`src/hooks/farm/inventory-relays.ts`), because they have to be findable by
-other clients.
+Inventory and item events go to the primary relay `wss://relay.blobbi.pet`
+and to `wss://relay.primal.net` and `wss://relay.ditto.pub`
+(`INVENTORY_RELAYS` in `src/hooks/farm/inventory-relays.ts`), because they have
+to be findable by other clients. A write counts once one of the last two has
+accepted it.
 
 A browser and editor for kind 31632 definitions lives at `/items`. See
 [docs/interoperability.md](docs/interoperability.md) for the cross-game flow

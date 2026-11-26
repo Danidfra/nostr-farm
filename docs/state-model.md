@@ -6,6 +6,16 @@ gone" below.
 All three kinds are addressable (NIP-01 30000–39999), so the relay keeps the
 newest event per `(pubkey, kind, d)` on its own.
 
+A write is stamped strictly after the event it replaces, so a plant and a
+water in the same second do not tie (`src/nostr/created-at.ts`, applied in
+`useNostrPublish`): `created_at = max(now, previous + 1)`, where `previous` is
+the later of what the caller last read and what this session last stamped at
+that address. The step is bounded: a stamp is never more than 60 s ahead of
+the device clock, so rapid writes cannot drift the clock or reach the relays'
+future limit. A previous event dated further ahead than that (a device with a
+fast clock wrote it) is not chased; it keeps winning until its time has
+passed.
+
 ## WorldState — kind 31415
 
 The root of one player's world.
@@ -70,6 +80,101 @@ V1 farms are **personal**. The owner is the sole authority for their own state.
 There is no ambient host, no host election, and no third-party writer whose
 `SlotState` is treated as authoritative.
 
+## Relays: a primary, the ones the game always used, and no relay believed alone
+
+| Flow | Kinds | Read from | Written to | A write counts when |
+| --- | --- | --- | --- | --- |
+| Game state | 31415, 31416, 31417 | `relay.blobbi.pet` (primary) + `relay.primal.net` | both | `relay.primal.net` accepted |
+| Inventory ledger | 31633 `farm:main`, 1416 (read only), 1417 | primary + `relay.primal.net` + `relay.ditto.pub` | all three | primal or ditto accepted |
+| Item Registry | 31632 | the same three | all three | reported per relay |
+| Profiles | 0 | `relay.primal.net` (pool default) | never written | n/a |
+| Login (NIP-46) | 24133 | the relays in the `bunker://` URI | same | n/a |
+| Uploads | 24242 | HTTP header to the Blossom server | n/a | n/a |
+
+The tables are `GAME_RELAYS` (`src/nostr/relays.ts`), `INVENTORY_RELAYS`
+(`src/hooks/farm/inventory-relays.ts`) and `ITEM_REGISTRY_RELAYS`
+(`src/inventory/constants.ts`). The rules shared with the other apps of the
+ecosystem (merge, certainty of absence, what may be carried) are in
+`src/lib/relay-routing.ts`, vendored verbatim from `@blobbi-kit/core`.
+
+The primary relay is listed first and is **not** `required`: its write list is
+a pilot allowlist, so most players are refused there
+(`blocked: this relay is in pilot mode; author is not on the write list`), and
+it rejects events above its size cap (`invalid:`). Neither fails an action.
+The publish result records each relay's verdict, and "About this farm" shows
+whether the primary is up to date, pending or refusing.
+
+Because the primary relay may hold nothing for a player, **order carries no
+authority and no read believes one relay**:
+
+- **Merge.** Every read asks every relay of its flow and deduplicates by id.
+  An addressable event keeps its NIP-01 winner (newer `created_at`, then the
+  lower id) wherever it came from; 1416 and 1417 are history and all are kept.
+- **A relay answered only by reaching `EOSE`.** One that closed the
+  subscription, timed out or failed did not answer; it did not answer "empty".
+- **Empty is a fact only when every relay said so.** Otherwise the state is
+  unknown: the field keeps what it last showed (`readFarmField`), planting on
+  a plot not confirmed bare is refused (`readPlotNow`), no farm is created
+  (`lookupFarm`) and `farm:main` is not started at revision 1
+  (`readConfirmedBase`).
+- **What was found may be built on only if a relay that makes writes count
+  answered.** Every successful write is on one of those, so a copy found only
+  elsewhere can be arbitrarily old (`current` in `readPlotNow`, `anchored` in
+  `InventoryReadResult`).
+- **A found answer is not held back for a slow relay** (`graceMs` in
+  `readFromRelays`); an empty one waits for everyone.
+
+**Copying existing records is off until the account turns it on.** Opening
+the app, restoring a saved login and receiving query results send no `EVENT`.
+The switch is "Copy existing records" in "About this farm": off by default,
+per pubkey, it lists the relays that would receive copies, and it can be
+turned off again. The answer (`SyncConsent`, stored under
+`nostr-worlds:relay-sync-consent`) covers exactly the relays shown; a relay
+added later is not covered until the account turns it on again.
+
+Once on, after a read `relaySync.carryMissing` (`src/nostr/relay-sync.ts`)
+offers the original signed event to the consented relays of the flow that
+certainly lack it: they reached `EOSE`, the filter was not filled to its
+limit, and the event is the signed-in account's own (31632: only when that
+account is the Farm issuer, and only toward the primary relay). Only the
+winning revision of an addressable event travels.
+
+With it off, one thing is still re-offered: an event the player's action
+published in this page session to a relay that gave no verdict. That finishes
+the publication and ends with the session; after a reload it is an existing
+record like any other. A ledger kept in
+`localStorage` stops repeats: accepted is never offered again, refused not for
+six hours, silence after a growing wait and at most six times; a relay that
+refused the author is not offered that author's other events for an hour.
+
+## Creating a farm: absence must be confirmed
+
+`WorldState` and `MapState` are replaceable, so publishing them over an
+existing farm silently renames it and re-points its entry map. "No farm" is
+therefore a claim the relays have to back, not the default for an empty
+answer. `lookupFarm` (`src/hooks/farm/farm-lookup.ts`) reads every configured
+game relay until `EOSE` (`readFromRelays` in `src/nostr/query.ts`) and
+reports one of:
+
+| Result | Meaning | May publish |
+| --- | --- | --- |
+| `found` | a world and a map parsed, from a completed or an incomplete read | nothing |
+| `absent` | every relay said `EOSE` with no world, on two reads a pause apart | world, then map |
+| `field-missing` | world confirmed, entry map confirmed absent the same way | map only |
+| `unknown` | a relay closed before `EOSE`, timed out or errored | nothing |
+
+A relay that answers `CLOSED` (auth required, rate limited) ends Nostrify's
+`req` stream without `EOSE`, which `relay.query()` reports as an empty array;
+only `readUntilEose` tells the two apart. An event that arrives before the
+stream is cut off still proves the farm exists, so an incomplete read can
+find a farm but never confirm there is none.
+
+`useCreateFarm` repeats the lookup itself immediately before publishing and
+acts on that result alone: `found` publishes nothing, `field-missing` restores
+the map and keeps the world, `absent` publishes both, `unknown` refuses.
+Repeating a create is therefore safe, and a create that landed halfway is
+completed rather than restarted.
+
 ## Slot identity
 
 Slot addresses stay **coordinate-derived**: `slot:<mapId>:<x>:<y>`.
@@ -87,6 +192,19 @@ The v1 problem was never the coordinates. It was that:
 Both are fixed. World and map ids are now validated against
 `/^[a-z0-9][a-z0-9._-]{0,63}$/` — no colons — which makes
 `slot:<mapId>:<x>:<y>` split unambiguously into exactly four parts.
+
+## Planting identity
+
+A slot address names a plot, not a planting: the same address holds one
+crop after another. A **planting** is `(slot d, planted_at)`. `planted_at`
+is assigned once when the seed goes in and copied unchanged by every later
+`SlotState` (watering, developer acceleration), so it survives the event id
+changing with each write. `plantingTime` in `src/farm/slots/transitions.ts`
+stamps every planting strictly after the plot's `last_harvested_at`, which
+makes `planted_at` monotonic per plot across devices and clocks. The
+inventory credits a harvest under this identity; see
+[`farm-inventory.md`](farm-inventory.md). Existing events need no change:
+`planted_at` has been a required tag since schema v2.
 
 ## Why v1 is gone
 

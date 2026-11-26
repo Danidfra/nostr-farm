@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { INVENTORY_KINDS } from '@/inventory/package';
 import { PRODUCE_CATALOG } from '@/inventory/produce-catalog';
 import { FakeRelayNetwork } from '@/test/fake-relay';
+import { INVENTORY_RELAYS } from './inventory-relays';
 import { OWNER, STRANGER, eventId, foldEvent, snapshotEvent, spendEvent } from '@/test/inventory-fixtures';
 
 let network = new FakeRelayNetwork();
@@ -99,7 +100,7 @@ describe('useFarmInventory', () => {
 
     await waitFor(() => expect(result.current.data?.produce).toEqual([{ definition: PUMPKIN, quantity: 2 }]));
     expect(network.queries.length).toBe(queries);
-    expect(network.openSubscriptions).toBe(2);
+    expect(network.openSubscriptions).toBe(INVENTORY_RELAYS.length);
   });
 
   it('keeps the balance continuous when the Farm folds the spend into a new snapshot', async () => {
@@ -125,8 +126,8 @@ describe('useFarmInventory', () => {
 
     await waitFor(() => expect(network.queries.length).toBeGreaterThan(0));
     // Every REQ was open when the very first read was sent — not after.
-    expect(network.queries[0].openSubscriptionsAtCall).toBe(2);
-    expect(network.openSubscriptions).toBe(2);
+    expect(network.queries[0].openSubscriptionsAtCall).toBe(INVENTORY_RELAYS.length);
+    expect(network.openSubscriptions).toBe(INVENTORY_RELAYS.length);
 
     // Another game spends while the read is still out.
     act(() => network.publish(spendEvent({ id: S1, item: PUMPKIN.address, quantity: 2, createdAt: 2_000 })));
@@ -138,8 +139,8 @@ describe('useFarmInventory', () => {
 
     // One authoritative read at mount, not one per party: the snapshot filter
     // went to each relay exactly once.
-    expect(network.queries.filter((q) => q.filters[0].kinds?.[0] === INVENTORY_KINDS.inventory)).toHaveLength(2);
-    for (const query of network.queries) expect(query.openSubscriptionsAtCall).toBe(2);
+    expect(network.queries.filter((q) => q.filters[0].kinds?.[0] === INVENTORY_KINDS.inventory)).toHaveLength(INVENTORY_RELAYS.length);
+    for (const query of network.queries) expect(query.openSubscriptionsAtCall).toBe(INVENTORY_RELAYS.length);
   });
 
   it('switching players cancels the previous player\'s pending missing-manifest retry', async () => {
@@ -176,8 +177,8 @@ describe('useFarmInventory', () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.produce).toEqual([]);
     expect(result.current.data?.snapshot).toBeNull();
-    expect(network.openSubscriptions).toBe(2);
-    for (const sub of network.subscriptions.slice(-2)) for (const f of sub.filters) expect(f.authors).toEqual([STRANGER]);
+    expect(network.openSubscriptions).toBe(INVENTORY_RELAYS.length);
+    for (const sub of network.subscriptions.slice(-INVENTORY_RELAYS.length)) for (const f of sub.filters) expect(f.authors).toEqual([STRANGER]);
 
     // The old player's spend reaches nobody's view.
     act(() => network.publish(spendEvent({ id: S1, item: PUMPKIN.address, quantity: 2, createdAt: 2_000 })));

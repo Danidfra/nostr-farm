@@ -33,6 +33,49 @@ import type { EventReference } from './relay-io';
  */
 export const FARM_HARVEST_MARKER = 'farm-harvest';
 
+/**
+ * The per-plot harvest record: `["harvest", "<slot d>", "<plantedAt>"]`.
+ *
+ * The `e` marker above names the plant EVENT that was consumed, and that id
+ * changes every time the plant is watered: one planting is E1 when sown, E2
+ * after the first watering, E3 after the next. Two harvesters holding
+ * different versions of the same ripe plant therefore present different ids,
+ * and an id-keyed check lets both of them credit it. The planting itself is
+ * identified by its plot and its `plantedAt`, which every transition carries
+ * through unchanged and which `plantingTime` keeps strictly increasing per
+ * plot. One record per plot — the newest planting credited there — answers
+ * "has this planting been credited?" permanently: any planting with a
+ * `plantedAt` at or below the record is an older cycle of that plot, or the
+ * same one, and either way was credited already.
+ *
+ * The record set is bounded by the number of plots ever harvested, not by the
+ * number of harvests. That is 36 for every farm that exists today; it grows
+ * with the field. See `docs/farm-inventory.md` for what has to change before
+ * a farm can have thousands of plots.
+ */
+export const FARM_HARVEST_RECORD_TAG = 'harvest';
+
+/**
+ * How many `farm-harvest` `e` markers a snapshot retains, beyond the ones that
+ * are still live (see `retainFarmTags`). The markers only identify a credit by
+ * event id, for reconciling an ambiguous publish and for change attribution;
+ * the per-plot record is what prevents a second credit.
+ */
+export const MAX_LEGACY_HARVEST_MARKERS = 64;
+
+/** One planting cycle of one plot: the identity a harvest is credited under. */
+export interface HarvestRecord {
+  /** The kind:31417 `d` tag, `slot:<map>:<x>:<y>`. */
+  slotD: string;
+  plantedAt: number;
+}
+
+/** Everything that can identify a harvest: the consumed event, and the planting it belonged to. */
+export interface HarvestIdentity {
+  consumedEventId: string;
+  planting?: HarvestRecord;
+}
+
 /** The inventory context the Farm writes. It writes no other. */
 export const FARM_INVENTORY_D = FARM_INVENTORY_CONTEXT;
 
@@ -77,14 +120,50 @@ export function harvestedEventIds(inventory: GameInventory | null): string[] {
 }
 
 /**
- * Has this exact plant event already been credited?
+ * The newest planting credited in each plot: slot `d` → `plantedAt`.
  *
- * This is the whole idempotency story. The consumed plant event id is durable,
- * identical on every device, and — unlike the empty slot event that replaces it
- * — unchanged when an attempt is retried.
+ * A malformed record (blank plot, non-integer time) is ignored rather than
+ * trusted; several records for one plot collapse to the newest.
  */
-export function isHarvestCredited(inventory: GameInventory | null, consumedEventId: string): boolean {
-  return harvestedEventIds(inventory).includes(consumedEventId);
+export function harvestRecords(inventory: GameInventory | null): Map<string, number> {
+  const records = new Map<string, number>();
+  if (!inventory) return records;
+  for (const tag of inventory.event.tags) {
+    const record = parseHarvestRecordTag(tag);
+    if (!record) continue;
+    const current = records.get(record.slotD);
+    if (current === undefined || record.plantedAt > current) records.set(record.slotD, record.plantedAt);
+  }
+  return records;
+}
+
+function parseHarvestRecordTag(tag: string[]): HarvestRecord | null {
+  if (tag[0] !== FARM_HARVEST_RECORD_TAG || typeof tag[1] !== 'string' || tag[1] === '') return null;
+  const plantedAt = Number(tag[2]);
+  if (!Number.isInteger(plantedAt) || plantedAt < 0) return null;
+  return { slotD: tag[1], plantedAt };
+}
+
+/**
+ * Has this harvest already been credited?
+ *
+ * Two independent checks, either of which is enough:
+ *
+ * - the consumed plant event id is among the `farm-harvest` markers — the
+ *   same attempt, retried, or an ambiguous publish that did land;
+ * - the plot's record is at or past the planting's `plantedAt` — the same
+ *   planting seen through a different event (watered elsewhere, or a stale
+ *   version that resurfaced), or an older cycle of the plot altogether.
+ *
+ * A legacy snapshot with markers and no records still answers through the
+ * first check, exactly as it did before records existed.
+ */
+export function isHarvestCredited(inventory: GameInventory | null, harvest: string | HarvestIdentity): boolean {
+  const identity: HarvestIdentity = typeof harvest === 'string' ? { consumedEventId: harvest } : harvest;
+  if (harvestedEventIds(inventory).includes(identity.consumedEventId)) return true;
+  if (!identity.planting) return false;
+  const credited = harvestRecords(inventory).get(identity.planting.slotD);
+  return credited !== undefined && credited >= identity.planting.plantedAt;
 }
 
 /** The quantity of one produce item currently held. */
@@ -124,6 +203,13 @@ export function preferNewerInventory(current: GameInventory, incoming: GameInven
   return current;
 }
 
+/** The `revision` tag of a snapshot event, when it carries a valid one. */
+export function snapshotRevision(event: NostrEvent): number | undefined {
+  const raw = event.tags.find(([name]) => name === 'revision')?.[1];
+  const value = raw === undefined ? NaN : Number(raw);
+  return Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
 /** Pick the newest valid `farm:main` inventory the owner authored. */
 export function selectNewestInventory(events: readonly NostrEvent[], ownerPubkey: string): GameInventory | null {
   let newest: GameInventory | null = null;
@@ -155,6 +241,20 @@ export interface CreditInput {
   /** Relay hint for the consumed event, so the marker is resolvable. */
   consumedEventRelay: string;
   /**
+   * The planting this harvest ends. Written as the plot's `harvest` record,
+   * replacing the plot's previous one. Every real harvest has it; it is
+   * optional only so the pure builder can be exercised without one.
+   */
+  planting?: HarvestRecord;
+  /**
+   * The kind:31417 event ids currently holding every plot of the map, as the
+   * client last read them. A legacy `farm-harvest` marker older than the
+   * retained window is dropped only when its event is NOT among these — an
+   * event that is still the current state of a plot could still be presented
+   * for harvest, so its marker stays. Omit it, and no marker is dropped.
+   */
+  liveSlotEventIds?: readonly string[];
+  /**
    * The kind:1417 manifest this snapshot newly settles spends through. Omit it
    * when nothing was settled: the base's own fold reference then round-trips
    * unchanged, which is what keeps already-folded spends folded.
@@ -178,8 +278,11 @@ export interface CreditInput {
  *   applications wrote — including our own earlier harvest markers.
  */
 export function buildCreditEvent(input: CreditInput): UnsignedEventTemplate<typeof KIND_GAME_INVENTORY> {
-  const { base, produce, consumedEventId, consumedEventRelay, fold } = input;
+  const { base, produce, consumedEventId, consumedEventRelay, planting, liveSlotEventIds, fold } = input;
   const marker: string[] = ['e', consumedEventId, consumedEventRelay, FARM_HARVEST_MARKER];
+  const extraTags: string[][] = planting
+    ? [marker, [FARM_HARVEST_RECORD_TAG, planting.slotD, String(planting.plantedAt)]]
+    : [marker];
   // A new manifest replaces the reference; no new manifest keeps the base's.
   const foldInput = fold ? { fold: { eventId: fold.eventId, relay: fold.relay } } : {};
 
@@ -190,18 +293,59 @@ export function buildCreditEvent(input: CreditInput): UnsignedEventTemplate<type
       items: [{ address: produce.address, relay: produce.relayHint, quantity: 1 }],
       revision: 1,
       ...foldInput,
-      extraTags: [marker],
+      extraTags,
     });
   }
 
   const next = addInventoryItemQuantity(base, produce.address, 1, produce.relayHint);
+  const rebuilt = toBuildGameInventoryInput(next);
 
   return buildGameInventoryEvent({
-    ...toBuildGameInventoryInput(next),
+    ...rebuilt,
+    preserveTags: retainFarmTags(rebuilt.preserveTags ?? [], { planting, liveSlotEventIds }),
     ...foldInput,
     revision: (next.revision ?? 0) + 1,
-    extraTags: [marker],
+    extraTags,
   });
+}
+
+/**
+ * Decide which of the Farm's own tags a rebuilt snapshot keeps. Every tag that
+ * is not the Farm's passes through untouched, in its original order.
+ *
+ * - **Records** are permanent. The only record ever removed is the one for
+ *   the plot being credited now, which the new record replaces. Age is never
+ *   a reason: the record is the proof that a plot's planting was credited, and
+ *   that proof has no expiry.
+ * - **Legacy `e` markers** are bounded. The newest `MAX_LEGACY_HARVEST_MARKERS − 1`
+ *   stay (the new one makes the full window), and so does any older marker
+ *   whose event is still the current state of some plot (`liveSlotEventIds`),
+ *   because such an event could still be presented for harvest. Without a
+ *   live-id list nothing can be vouched for, so nothing is dropped. A marker
+ *   dropped under this rule can only matter again if a relay loses the newer
+ *   slot events and an old one resurfaces as current.
+ */
+export function retainFarmTags(
+  tags: readonly string[][],
+  options: { planting?: HarvestRecord; liveSlotEventIds?: readonly string[] }
+): string[][] {
+  const live = options.liveSlotEventIds ? new Set(options.liveSlotEventIds) : null;
+  const markerPositions = tags.flatMap((tag, index) => (isLegacyMarker(tag) ? [index] : []));
+  const windowStart = markerPositions.length - (MAX_LEGACY_HARVEST_MARKERS - 1);
+  const dropMarkers = new Set(
+    live ? markerPositions.filter((position, rank) => rank < windowStart && !live.has(tags[position][1])) : []
+  );
+
+  return tags.filter((tag, index) => {
+    if (dropMarkers.has(index)) return false;
+    const record = parseHarvestRecordTag(tag);
+    if (record && options.planting && record.slotD === options.planting.slotD) return false;
+    return true;
+  });
+}
+
+function isLegacyMarker(tag: string[]): boolean {
+  return tag[0] === 'e' && tag[3] === FARM_HARVEST_MARKER && typeof tag[1] === 'string' && tag[1] !== '';
 }
 
 /**

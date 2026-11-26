@@ -145,10 +145,19 @@ button there; it is never wired to a form change, a blur, or the completion of
 an upload.
 
 The event is signed with `useCurrentUser().user.signer` and offered to every
-registry relay individually, with each relay's answer reported. This does not go
-through `useNostrPublish`, which targets the single game relay and reports
-success generously — right for gameplay writes, wrong for a tool whose job is to
-tell you what actually reached the network.
+registry relay individually (`ITEM_REGISTRY_RELAYS`: the primary relay, then
+primal and ditto), with each relay's answer reported. The primary relay accepts
+definitions from recognised issuers only, so for any other signer its row is a
+refusal while the others accept. This does not go through `useNostrPublish`,
+which targets the game relays and reports success generously — right for
+gameplay writes, wrong for a tool whose job is to tell you what actually
+reached the network.
+
+Reads ask every registry relay and merge, and send nothing. Only when the
+signed-in account is the Farm issuer and has turned on "Copy existing records"
+is an official definition that the primary relay certainly lacks offered to
+it; nothing signed by anyone else is copied anywhere, and nothing is pushed to
+the public relays (`carryOfficialDefinitions`).
 
 On success the caches are updated so the item appears immediately, and its full
 address is shown with a copy button.

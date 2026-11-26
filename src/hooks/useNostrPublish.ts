@@ -4,15 +4,25 @@ import { useMutation, type UseMutationResult } from "@tanstack/react-query";
 import { useCurrentUser } from "./useCurrentUser";
 import { publishToRelays } from "@/nostr/publish";
 import { GAME_RELAYS } from "@/nostr/relays";
+import { relaySync } from "@/nostr/relay-sync";
+import { replaceableAddress, stampReplaceable } from "@/nostr/created-at";
 
 import type { NostrEvent } from "@nostrify/nostrify";
 
-export function useNostrPublish(): UseMutationResult<NostrEvent, Error, Partial<Omit<NostrEvent, 'id' | 'pubkey' | 'sig'>>> {
+/**
+ * What to publish. `replaces` is the event this write replaces, as the caller
+ * last read it from the relays; it is never signed or sent.
+ */
+export type PublishTemplate = Partial<Omit<NostrEvent, 'id' | 'pubkey' | 'sig'>> & {
+  replaces?: Pick<NostrEvent, 'created_at'>;
+};
+
+export function useNostrPublish(): UseMutationResult<NostrEvent, Error, PublishTemplate> {
   const { nostr } = useNostr();
   const { user } = useCurrentUser();
 
   return useMutation({
-    mutationFn: async (t: Partial<Omit<NostrEvent, 'id' | 'pubkey' | 'sig'>>) => {
+    mutationFn: async (t: PublishTemplate) => {
       if (!user) {
         throw new Error("User is not logged in");
       }
@@ -28,6 +38,23 @@ export function useNostrPublish(): UseMutationResult<NostrEvent, Error, Partial<
       const now = Math.floor(Date.now() / 1000);
       const providedTimestamp = t.created_at;
       let finalTimestamp = providedTimestamp ?? now;
+
+      // A replaceable or addressable write without an explicit timestamp is
+      // stamped strictly after the event it replaces, within a bounded skew
+      // (see src/nostr/created-at.ts), so a second write in the same second
+      // still wins on the relays.
+      const address = providedTimestamp === undefined ? replaceableAddress(t.kind!, user.pubkey, tags) : undefined;
+      if (address !== undefined) {
+        const stamp = stampReplaceable(address, t.replaces?.created_at, now);
+        finalTimestamp = stamp.createdAt;
+        if (stamp.previousAhead && process.env.NODE_ENV === 'development') {
+          console.warn('[useNostrPublish] The replaced event is dated too far ahead to follow; it keeps winning until its time has passed.', {
+            address,
+            previous: t.replaces?.created_at,
+            now,
+          });
+        }
+      }
 
       // Clamp timestamps that are more than 5 minutes in the future
       const maxFutureOffset = 5 * 60; // 5 minutes in seconds
@@ -62,8 +89,12 @@ export function useNostrPublish(): UseMutationResult<NostrEvent, Error, Partial<
         created_at: finalTimestamp,
       });
 
-      // Publish to configured relays with detailed error handling
-      const publishResult = await publishToRelays(nostr, event, GAME_RELAYS);
+      // Publish to configured relays with detailed error handling. Each
+      // relay's verdict goes to the sync ledger as it arrives, including a
+      // primary relay that answers after this call has already returned.
+      const publishResult = await publishToRelays(nostr, event, GAME_RELAYS, {
+        onDelivery: (published, result) => relaySync.recordDeliveries(published, [result]),
+      });
 
       // Store publish metadata for logging (but return event for backward compatibility)
       if (process.env.NODE_ENV === 'development') {

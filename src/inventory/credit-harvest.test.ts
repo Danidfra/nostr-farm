@@ -22,8 +22,12 @@ import { creditHarvest, isSameManifest, reconcileCredit, type CreditDeps, type P
 const PLANT = 'c'.repeat(64);
 const PLANT_2 = 'd'.repeat(64);
 
-const request = { produce: CARROT, consumedEventId: PLANT, consumedEventRelay: RELAY };
-const strawberryRequest = { produce: STRAWBERRY, consumedEventId: PLANT, consumedEventRelay: RELAY };
+const PLOT = 'slot:farm.field:3:2';
+const PLANTING = { slotD: PLOT, plantedAt: 1_699_990_000 };
+const request = { produce: CARROT, consumedEventId: PLANT, consumedEventRelay: RELAY, planting: PLANTING };
+const strawberryRequest = { produce: STRAWBERRY, consumedEventId: PLANT, consumedEventRelay: RELAY, planting: PLANTING };
+/** A second, different planting in another plot, harvested through event PLANT_2. */
+const SECOND = { consumedEventId: PLANT_2, planting: { slotD: 'slot:farm.field:0:0', plantedAt: 1_699_990_000 } };
 
 const ACCEPTED: PublishOutcome = { status: 'accepted', acceptedRelays: [RELAY], errors: [] };
 const REJECTED: PublishOutcome = { status: 'rejected', acceptedRelays: [], errors: [{ relay: RELAY, error: 'blocked' }] };
@@ -68,15 +72,17 @@ function world(options: WorldOptions = {}) {
       reads += 1;
       if (readsToFail > 0) {
         readsToFail -= 1;
-        return { events: [], answered: options.answered ?? false };
+        return { events: [], answered: options.answered ?? false, anchored: options.answered ?? false, complete: options.answered ?? false };
       }
-      return { events: [...store], answered: true };
+      return { events: [...store], answered: true, anchored: true, complete: true };
     },
-    readSpends: async () => ({ events: [...spends], answered: options.spendsAnswered ?? true }),
-    readFolds: async () => ({ events: [...folds], answered: true }),
+    readSpends: async () => ({ events: [...spends], answered: options.spendsAnswered ?? true, anchored: options.spendsAnswered ?? true, complete: options.spendsAnswered ?? true }),
+    readFolds: async () => ({ events: [...folds], answered: true, anchored: true, complete: true }),
     readFoldsById: async (references) => ({
       events: folds.filter((fold) => references.some((reference) => reference.eventId === fold.id)),
       answered: true,
+      anchored: true,
+      complete: true,
     }),
     signEvent: async (template) => {
       signCount += 1;
@@ -179,7 +185,7 @@ describe('unusable reads never become an empty base', () => {
       ...w.deps,
       readInventory: async () => {
         call += 1;
-        return call === 1 ? { events: [], answered: true } : { events: [], answered: false };
+        return call === 1 ? { events: [], answered: true, anchored: true, complete: true } : { events: [], answered: false, anchored: false, complete: false };
       },
       signEvent: async () => {
         throw new Error('should not sign');
@@ -189,6 +195,57 @@ describe('unusable reads never become an empty base', () => {
     const result = await creditHarvest(deps, request);
     expect(result.status).toBe('rejected');
     expect(w.store).toHaveLength(0);
+  });
+
+  it('does not take an empty answer for "no inventory" while a relay has not answered', async () => {
+    // Some relay reached EOSE with nothing; another closed or timed out. The
+    // one that did not answer may be the one holding the inventory.
+    const w = world();
+    const deps: CreditDeps = {
+      ...w.deps,
+      readInventory: async () => ({ events: [], answered: true, anchored: true, complete: false }),
+    };
+
+    const result = await creditHarvest(deps, request);
+
+    expect(result.status).toBe('rejected');
+    expect(w.signCount).toBe(0);
+    expect(w.published).toEqual([]);
+    expect(w.store).toHaveLength(0);
+  });
+
+  it('does not believe an empty confirming read that not every relay finished', async () => {
+    const w = world();
+    let call = 0;
+    const deps: CreditDeps = {
+      ...w.deps,
+      readInventory: async () => {
+        call += 1;
+        return { events: [], answered: true, anchored: true, complete: call === 1 };
+      },
+    };
+
+    const result = await creditHarvest(deps, request);
+
+    expect(result.status).toBe('rejected');
+    expect(w.signCount).toBe(0);
+  });
+
+  it('does not build on a snapshot found only where writes are not guaranteed to be', async () => {
+    // Found, but none of the relays a write must land on answered: the copy
+    // may be many revisions old, and a credit on it would drop the rest.
+    const w = world();
+    const found = snapshotEvent({ id: eventId('old'), items: { [CARROT.address]: 1 }, revision: 1 });
+    const deps: CreditDeps = {
+      ...w.deps,
+      readInventory: async () => ({ events: [found], answered: true, anchored: false, complete: false }),
+    };
+
+    const result = await creditHarvest(deps, request);
+
+    expect(result.status).toBe('rejected');
+    expect(w.signCount).toBe(0);
+    expect(w.published).toEqual([]);
   });
 
   it('uses an inventory the confirming read reveals, instead of replacing it', async () => {
@@ -202,11 +259,11 @@ describe('unusable reads never become an empty base', () => {
       ...w.deps,
       readInventory: async () => {
         call += 1;
-        return call === 1 ? { events: [], answered: true } : { events: existing, answered: true };
+        return call === 1 ? { events: [], answered: true, anchored: true, complete: true } : { events: existing, answered: true, anchored: true, complete: true };
       },
     };
 
-    const result = await creditHarvest(deps, { ...request, consumedEventId: PLANT_2 });
+    const result = await creditHarvest(deps, { ...request, ...SECOND });
     expect(result.status).toBe('accepted');
     if (result.status !== 'accepted') return;
 
@@ -255,7 +312,7 @@ describe('idempotency', () => {
   it('still credits a different plant event', async () => {
     const w = world();
     await creditHarvest(w.deps, request);
-    const other = await creditHarvest(w.deps, { ...request, consumedEventId: PLANT_2 });
+    const other = await creditHarvest(w.deps, { ...request, ...SECOND });
 
     expect(other.status).toBe('accepted');
     expect(produceQuantity(w.inventory(), CARROT.address)).toBe(2);
@@ -325,7 +382,7 @@ describe('ambiguous reconciliation', () => {
   it('treats an unreadable reconciliation as not-credited rather than credited', async () => {
     const deps = {
       ownerPubkey: OWNER,
-      readInventory: async () => ({ events: [], answered: false }),
+      readInventory: async () => ({ events: [], answered: false, anchored: false, complete: false }),
     };
     expect((await reconcileCredit(deps, request)).credited).toBe(false);
   });
@@ -401,7 +458,7 @@ describe('folding pending spends while writing', () => {
     expect(w.effectiveQuantity(STRAWBERRY.address)).toBe(1);
 
     // And it stays void on every later write, whatever the balance.
-    const later = await creditHarvest(w.deps, { ...strawberryRequest, consumedEventId: PLANT_2 });
+    const later = await creditHarvest(w.deps, { ...strawberryRequest, ...SECOND });
     expect(later.status).toBe('accepted');
     expect(w.folds).toHaveLength(1);
     expect(w.effectiveQuantity(STRAWBERRY.address)).toBe(2);
@@ -485,7 +542,7 @@ describe('folding pending spends while writing', () => {
     w.spend({ id: S1 });
 
     await creditHarvest(w.deps, strawberryRequest);
-    await creditHarvest(w.deps, { ...strawberryRequest, consumedEventId: PLANT_2 });
+    await creditHarvest(w.deps, { ...strawberryRequest, ...SECOND });
 
     expect(w.folds).toHaveLength(1);
     expect(foldTag(w.store.at(-1))?.[1]).toBe(w.folds[0].id);
@@ -720,5 +777,125 @@ describe('manifest accepted, snapshot not', () => {
     expect(w.effectiveQuantity(STRAWBERRY.address)).toBe(3);
     expect((await creditHarvest(w.deps, strawberryRequest)).status).toBe('already-applied');
     expect(w.folds).toHaveLength(1);
+  });
+});
+
+describe('planting identity', () => {
+  const later = (eventId: string, plantedAt = PLANTING.plantedAt) => ({ ...request, consumedEventId: eventId, planting: { slotD: PLOT, plantedAt } });
+
+  it('credits one planting once, however many event versions of it are presented', async () => {
+    const w = world();
+    expect((await creditHarvest(w.deps, request)).status).toBe('accepted');
+
+    // The same planting after a watering on another device: a new event id.
+    const again = await creditHarvest(w.deps, later(PLANT_2));
+
+    expect(again.status).toBe('already-applied');
+    expect(w.effectiveQuantity(CARROT.address)).toBe(1);
+    expect(w.published).toEqual([KIND_GAME_INVENTORY]);
+  });
+
+  it('refuses an older cycle of the plot that resurfaced', async () => {
+    const w = world();
+    await creditHarvest(w.deps, request);
+
+    const stale = await creditHarvest(w.deps, later(PLANT_2, PLANTING.plantedAt - 3600));
+
+    expect(stale.status).toBe('already-applied');
+    expect(w.effectiveQuantity(CARROT.address)).toBe(1);
+  });
+
+  it('credits the next cycle of the same plot', async () => {
+    const w = world();
+    await creditHarvest(w.deps, request);
+
+    const next = await creditHarvest(w.deps, later(PLANT_2, PLANTING.plantedAt + 1));
+
+    expect(next.status).toBe('accepted');
+    expect(w.effectiveQuantity(CARROT.address)).toBe(2);
+    const records = w.inventory()!.event.tags.filter((t) => t[0] === 'harvest');
+    expect(records).toEqual([['harvest', PLOT, String(PLANTING.plantedAt + 1)]]);
+  });
+
+  it('reconciles an ambiguous publish by planting when the event id has moved on', async () => {
+    const w = world({ publish: AMBIGUOUS });
+    const first = await creditHarvest(w.deps, request);
+    expect(first.status).toBe('ambiguous');
+    if (first.status === 'ambiguous') w.land(first.event);
+
+    const check = await reconcileCredit(w.deps, later(PLANT_2));
+    expect(check.credited).toBe(true);
+  });
+
+  it('a legacy snapshot without records still blocks the exact same event id', async () => {
+    const w = world();
+    w.seed(snapshotEvent({ items: { [CARROT.address]: 4 }, extraTags: [['e', PLANT, RELAY, 'farm-harvest']] }));
+
+    expect((await creditHarvest(w.deps, request)).status).toBe('already-applied');
+    // ...but a different id of the same planting is not recognised by a legacy snapshot.
+    expect((await creditHarvest(w.deps, later(PLANT_2))).status).toBe('accepted');
+    expect(w.effectiveQuantity(CARROT.address)).toBe(5);
+    // From now on the plot has a record, so a third version is refused.
+    expect((await creditHarvest(w.deps, later('e'.repeat(64)))).status).toBe('already-applied');
+  });
+});
+
+describe('revision floor', () => {
+  it('refuses to build on a read that is behind the revision this client already saw', async () => {
+    const w = world();
+    expect((await creditHarvest(w.deps, request)).status).toBe('accepted');
+
+    // The relays answer, but without the snapshot that was just written.
+    const lagging: CreditDeps = { ...w.deps, readInventory: async () => ({ events: [], answered: true, anchored: true, complete: true }), minRevision: 1 };
+    const result = await creditHarvest(lagging, { ...request, ...SECOND });
+
+    expect(result).toMatchObject({ status: 'stale-read', expectedRevision: 1 });
+    expect(w.published).toEqual([KIND_GAME_INVENTORY]);
+    expect(w.signCount).toBe(1);
+  });
+
+  it('without a floor, the same lagging read rebuilds the inventory from scratch and loses the first harvest', async () => {
+    const w = world();
+    await creditHarvest(w.deps, request);
+    const lagging: CreditDeps = { ...w.deps, readInventory: async () => ({ events: [], answered: true, anchored: true, complete: true }) };
+
+    const result = await creditHarvest(lagging, { ...request, ...SECOND });
+
+    expect(result.status).toBe('accepted');
+    if (result.status !== 'accepted') return;
+    // This is the hazard the floor exists to stop: one carrot instead of two.
+    expect(produceQuantity(parseSnapshot(result.event), CARROT.address)).toBe(1);
+  });
+
+  it('refuses a snapshot older than the one it has seen, naming both revisions', async () => {
+    const w = world();
+    const older = snapshotEvent({ id: eventId('old'), items: { [CARROT.address]: 1 }, revision: 1, createdAt: 1_700_000_000 });
+    w.seed(older);
+    const lagging: CreditDeps = { ...w.deps, minRevision: 2 };
+
+    const result = await creditHarvest(lagging, request);
+
+    expect(result).toMatchObject({ status: 'stale-read', expectedRevision: 2, seenRevision: 1 });
+    if (result.status === 'stale-read') expect(result.error).toMatch(/revision 1, but this device has already seen revision 2/);
+  });
+
+  it('a snapshot with no revision at all cannot be placed, so it is stale under a floor', async () => {
+    const w = world();
+    w.seed(snapshotEvent({ items: { [CARROT.address]: 1 } }));
+
+    expect((await creditHarvest({ ...w.deps, minRevision: 1 }, request)).status).toBe('stale-read');
+    // And perfectly fine without a floor, as for a fresh page load.
+    expect((await creditHarvest(w.deps, request)).status).toBe('accepted');
+  });
+
+  it('reconciliation treats a stale read as unproven rather than as not-credited', async () => {
+    const w = world({ publish: AMBIGUOUS });
+    const first = await creditHarvest(w.deps, request);
+    expect(first.status).toBe('ambiguous');
+
+    const check = await reconcileCredit({ ...w.deps, readInventory: async () => ({ events: [], answered: true, anchored: true, complete: true }), minRevision: 1 }, request);
+
+    expect(check.credited).toBe(false);
+    expect(check.stale).toBe(true);
   });
 });
